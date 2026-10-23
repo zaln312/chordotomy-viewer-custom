@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The page may load only its own files and play blob: audio: no fetches, fonts or trackers,
+         so a recording opened here cannot leave the browser. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; media-src blob:; base-uri 'none'; form-action 'none'"
+    />
+    <title>chordotomy viewer: a song's chords, key and Roman numerals</title>
+    <meta
+      name="description"
+      content="Play a recording with its chords on the beat, Roman numerals and bass, secondary dominants and borrowed chords in colour. Correct and save; nothing is uploaded."
+    />
+    <link rel="canonical" href="https://zeikar.dev/chordotomy/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="chordotomy" />
+    <meta property="og:title" content="chordotomy viewer: a song's chords, key and Roman numerals" />
+    <meta
+      property="og:description"
+      content="Play a recording with its chords, Roman numerals and bass notes. Secondary dominants and borrowed chords stand out. Files stay in your browser."
+    />
+    <meta property="og:url" content="https://zeikar.dev/chordotomy/" />
+    <meta property="og:image" content="https://zeikar.dev/chordotomy/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="The chordotomy viewer: a borrowed Fm, its Roman numeral iv in C major, and a chord strip coloured by role"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 15 12 1' stroke='%23888' stroke-width='2.5'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <script src="harmony.js" defer></script>
+    <script src="core.js" defer></script>
+    <script src="edit.js" defer></script>
+    <script src="pianokeys/index.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="bar">
+      <p class="wordmark">chordotomy</p>
+      <dl class="files" id="files" hidden>
+        <div>
+          <dt>Recording</dt>
+          <dd id="audio-name">none yet</dd>
+        </div>
+        <div>
+          <dt>Chords</dt>
+          <dd id="json-name">none yet</dd>
+        </div>
+        <div id="lab-file" hidden>
+          <dt>Lab</dt>
+          <dd id="lab-name">none yet</dd>
+        </div>
+      </dl>
+      <p class="privacy">Files stay in this browser. Nothing is uploaded.</p>
+      <a class="repo" href="https://github.com/zeikar/chordotomy">GitHub</a>
+      <button type="button" class="button open-files">Open files</button>
+      <button
+        type="button"
+        class="button toggle"
+        id="dual-view"
+        aria-pressed="false"
+        title="Show ChordFormer's keys under chordotomy's"
+      >
+        Dual view
+      </button>
+      <button type="button" class="button theme-toggle" id="theme-toggle">Theme: Auto</button>
+      <input
+        id="picker"
+        type="file"
+        multiple
+        accept="audio/*,.json,application/json,.lab,.txt,text/plain"
+        hidden
+      />
+    </header>
+
+    <div id="status" class="status" role="status" hidden>
+      <div id="messages"></div>
+      <button type="button" class="dismiss" id="dismiss">Dismiss</button>
+    </div>
+
+    <main id="empty" class="empty">
+      <h1>See a song's chords, key and Roman numerals</h1>
+      <p class="lede">
+        Play a recording with the chord timeline chordotomy wrote for it: a chord on every beat,
+        its numeral and bass, and the secondary dominants and borrowed chords in colour.
+      </p>
+      <div class="sample" aria-hidden="true">
+        <span class="segment" data-role="diatonic"
+          ><span class="segment-chord">C</span><span class="segment-numeral">I</span></span
+        >
+        <span class="segment" data-role="secondary_dominant"
+          ><span class="segment-chord">A7</span
+          ><span class="segment-numeral">V<sup>7</sup>/ii</span></span
+        >
+        <span class="segment" data-role="diatonic"
+          ><span class="segment-chord">Dm7</span
+          ><span class="segment-numeral">ii<sup>7</sup></span></span
+        >
+        <span class="segment" data-role="borrowed"
+          ><span class="segment-chord">Fm</span><span class="segment-numeral">iv</span></span
+        >
+        <span class="segment" data-role="diatonic"
+          ><span class="segment-chord">C</span><span class="segment-numeral">I</span></span
+        >
+      </div>
+      <ol class="steps">
+        <li>
+          Analyze the recording on your computer with
+          <a href="https://github.com/zeikar/chordotomy#quick-start">chordotomy</a>:
+          <code>chordotomy analyze song.mp3</code> writes <code>song.chords.json</code> next to it.
+        </li>
+        <li>
+          Open the recording and its <code>.chords.json</code> here. A <code>.lab</code> from
+          another tool opens beside it, on the same beat grid.
+        </li>
+        <li>
+          Play. Turn on <b>Play chords</b> to check them by ear, correct a chord in the editor, and
+          save the edited timeline.
+        </li>
+      </ol>
+      <div class="drop">
+        <button type="button" class="button open-files">Open files</button>
+        <span>or drop both files anywhere on this page</span>
+      </div>
+    </main>
+
+    <main id="viewer" class="viewer" hidden>
+      <section class="now" aria-label="Current chord">
+        <div class="now-chord">
+          <p class="big-chord" id="now-chord"></p>
+          <p class="big-numeral" id="now-numeral"></p>
+          <p class="badge" id="now-edited" hidden>Edited</p>
+        </div>
+        <dl class="facts">
+          <div>
+            <dt>Role</dt>
+            <dd id="now-role"></dd>
+          </div>
+          <div>
+            <dt>Bass</dt>
+            <dd id="now-bass"></dd>
+          </div>
+          <div>
+            <dt id="now-alt-label">Also heard as</dt>
+            <dd class="candidates" id="now-alt"></dd>
+          </div>
+        </dl>
+
+        <!-- The current chord's keys; app.js draws them here and sounds them on a click. In dual
+             view, ChordFormer's reading of the current chord sits under them. -->
+        <div class="chord-keys-stack" id="chord-keys-stack">
+          <button type="button" class="chord-keys" id="chord-keys" hidden></button>
+          <button
+            type="button"
+            class="chord-keys chord-keys-former"
+            id="chord-keys-former"
+            hidden
+          ></button>
+        </div>
+
+        <aside class="key" aria-label="Key">
+          <p class="key-label">Key</p>
+          <p class="key-name" id="key-name"></p>
+          <!-- app.js adds the 24 keys and names the estimate. -->
+          <select class="key-select" id="key-select" aria-label="Set the key">
+            <option value="">Estimated</option>
+          </select>
+          <p class="key-source" id="key-source"></p>
+          <p class="key-label" id="key-regions-label" hidden>Key changes</p>
+          <ol class="key-regions" id="key-regions" hidden></ol>
+          <p class="key-label" id="key-candidates-label"></p>
+          <ol class="key-candidates" id="key-candidates"></ol>
+        </aside>
+      </section>
+
+      <!-- Acts on the current chord. Values are the timeline's own: sharp roots, quality names, N. -->
+      <section class="editor" id="editor" aria-label="Edit chord">
+        <label class="pick">
+          Root
+          <select id="edit-root">
+            <option value="C">C</option>
+            <option value="C#">C♯/D♭</option>
+            <option value="D">D</option>
+            <option value="D#">D♯/E♭</option>
+            <option value="E">E</option>
+            <option value="F">F</option>
+            <option value="F#">F♯/G♭</option>
+            <option value="G">G</option>
+            <option value="G#">G♯/A♭</option>
+            <option value="A">A</option>
+            <option value="A#">A♯/B♭</option>
+            <option value="B">B</option>
+          </select>
+        </label>
+        <label class="pick">
+          Quality
+          <select id="edit-quality">
+            <option value="maj">major</option>
+            <option value="min">m</option>
+            <option value="7">7</option>
+            <option value="maj7">maj7</option>
+            <option value="min7">m7</option>
+            <option value="min6">m6</option>
+            <option value="hdim7">m7♭5</option>
+            <option value="dim7">dim7</option>
+            <option value="sus4">sus4</option>
+            <option value="aug">aug</option>
+            <option value="dim">dim</option>
+            <option value="sus2">sus2</option>
+            <option value="sus4(b7)">7sus4</option>
+            <option value="maj(9)">add9</option>
+            <option value="min(9)">madd9</option>
+            <option value="N">No chord</option>
+          </select>
+        </label>
+        <label class="pick">
+          Bass
+          <select id="edit-bass">
+            <option value="root">Root</option>
+            <option value="C">C</option>
+            <option value="C#">C♯/D♭</option>
+            <option value="D">D</option>
+            <option value="D#">D♯/E♭</option>
+            <option value="E">E</option>
+            <option value="F">F</option>
+            <option value="F#">F♯/G♭</option>
+            <option value="G">G</option>
+            <option value="G#">G♯/A♭</option>
+            <option value="A">A</option>
+            <option value="A#">A♯/B♭</option>
+            <option value="B">B</option>
+            <option value="none">None</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button type="button" class="button" id="split">Split at beat</button>
+          <button
+            type="button"
+            class="button"
+            id="merge-before"
+            aria-label="Merge with the chord before"
+            title="Merge with the chord before"
+          >
+            Merge &larr;
+          </button>
+          <button
+            type="button"
+            class="button"
+            id="merge-after"
+            aria-label="Merge with the chord after"
+            title="Merge with the chord after"
+          >
+            Merge &rarr;
+          </button>
+          <button type="button" class="button" id="delete">Delete</button>
+          <button type="button" class="button" id="undo">Undo</button>
+          <button type="button" class="button" id="redo">Redo</button>
+        </div>
+        <div class="save">
+          <p class="unsaved" id="unsaved" hidden>Unsaved edits</p>
+          <button
+            type="button"
+            class="button"
+            id="save"
+            title="Download the timeline with your edits as a new .edited.chords.json; the opened file stays as it is"
+          >
+            Save edited JSON
+          </button>
+        </div>
+      </section>
+
+      <section class="timeline" aria-label="Chord timeline">
+        <div class="strip" id="strip">
+          <div class="track" id="track">
+            <div class="segments" id="segments"></div>
+            <div class="ruler" id="ruler" aria-hidden="true"></div>
+            <div class="playhead" id="playhead" aria-hidden="true"></div>
+          </div>
+        </div>
+        <!-- app.js fills this from a .lab file, a second reading of the same song. -->
+        <p class="lab-title" id="lab-title" hidden></p>
+        <div class="strip" id="lab-strip" hidden>
+          <div class="track lab-track" id="lab-track">
+            <div class="segments lab-segments" id="lab-segments"></div>
+            <div class="playhead" id="lab-playhead" aria-hidden="true"></div>
+          </div>
+        </div>
+        <ul class="legend" aria-label="Colours and marks">
+          <li data-role="diatonic">Diatonic</li>
+          <li data-role="secondary_dominant">Secondary dominant / leading-tone chord</li>
+          <li data-role="borrowed">Borrowed</li>
+          <li data-role="chromatic">Chromatic</li>
+          <li data-role="none">No chord</li>
+          <li class="edited">Edited</li>
+        </ul>
+      </section>
+
+      <section class="transport" aria-label="Playback">
+        <audio id="audio" controls preload="auto" hidden></audio>
+        <p class="no-audio" id="no-audio">
+          Only the chords play. Open the recording too, to play along.
+        </p>
+        <p class="no-audio" id="source" hidden>
+          Only the chords play. The recording is at
+          <a id="source-link" target="_blank" rel="noopener noreferrer"></a>; open it here too, to
+          play along.
+        </p>
+        <div class="listen" id="listen" hidden>
+          <button
+            type="button"
+            class="button toggle"
+            id="mute-recording"
+            aria-pressed="false"
+            title="Silence the recording to hear the chords on their own"
+          >
+            Mute recording
+          </button>
+          <div class="listen-chords">
+            <button
+              type="button"
+              class="button toggle"
+              id="play-chords"
+              aria-pressed="false"
+              title="Play the detected chords on every beat, to check them by ear"
+            >
+              Play chords
+            </button>
+            <label class="volume">
+              Chord volume
+              <input type="range" id="chord-volume" min="0" max="100" value="80" />
+            </label>
+          </div>
+        </div>
+        <p class="keys">
+          <span><kbd>Space</kbd> play or pause</span>
+          <span><kbd>&larr;</kbd> <kbd>&rarr;</kbd> back or forward a chord</span>
+          <span><kbd>Shift</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd> back or forward a beat</span>
+          <span id="chords-key" hidden><kbd>C</kbd> play chords</span>
+          <span id="mute-key" hidden><kbd>M</kbd> mute recording</span>
+          <span>click a chord to jump to it</span>
+          <span><kbd>S</kbd> split at the beat</span>
+          <span><kbd>Delete</kbd> delete the chord</span>
+          <span><kbd>Ctrl/⌘</kbd> <kbd>Z</kbd> undo</span>
+          <span><kbd>Ctrl/⌘</kbd> <kbd>Shift</kbd> <kbd>Z</kbd> redo</span>
+        </p>
+        <p class="visually-hidden" id="announce" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <div class="dropzone" id="dropzone" hidden>
+      <p>Drop the recording, its <code>.chords.json</code> and a <code>.lab</code></p>
+    </div>
+  </body>
+</html>

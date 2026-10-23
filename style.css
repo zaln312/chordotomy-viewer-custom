@@ -1,0 +1,1195 @@
+/* Staff paper and graphite: the chrome stays grey so that colour only ever means a harmonic role.
+   System fonts only, since the page loads nothing from the network. Sizes step by a perfect
+   fourth (4:3) from 15px. */
+
+/* Iowan, Palatino and Georgia have no ♭ or ♯, and Chrome on macOS falls back to a CJK font whose
+   flat is a full em wide ("B ♭"). This face lends just those two glyphs from installed fonts. The
+   metric overrides stop a math font's tall extents from stretching the line. */
+@font-face {
+  font-family: "Accidentals";
+  src:
+    local("STIX Two Math"),
+    local("STIXTwoMath-Regular"),
+    local("Apple Symbols"),
+    local("AppleSymbols"),
+    local("Segoe UI Symbol"),
+    local("Noto Music"),
+    local("DejaVu Sans");
+  unicode-range: U+266D-266F;
+  ascent-override: 90%;
+  descent-override: 25%;
+  line-gap-override: 0%;
+}
+
+:root {
+  color-scheme: light dark;
+  --serif: "Accidentals", "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
+    "URW Palladio L", P052, Georgia, serif;
+  --sans: "Accidentals", "Avenir Next", Avenir, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+
+  --paper: #eceee8;
+  --sheet: #f8f9f5;
+  --cell: #e3e6df;
+  --ink: #1c2330;
+  --pencil: #596170;
+  --rule: #c5c9c1;
+
+  --sec: #8f5400;
+  --sec-fill: #f5e2bd;
+  --bor: #5a43a6;
+  --bor-fill: #e4dcf6;
+  --chr: #a02147;
+  --chr-fill: #f5d8e0;
+  /* The keys the current chord is drawn on. */
+  --press: #7cc48f;
+  /* ChordFormer's keys, when dual view shows them under chordotomy's. */
+  --press-former: #2e8b57;
+  --hatch: #d3d7cf;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #161a21;
+    --sheet: #1d222b;
+    --cell: #2a303b;
+    --ink: #e6e8e3;
+    --pencil: #9aa1ad;
+    --rule: #3a414e;
+
+    --sec: #f0b54a;
+    --sec-fill: #463619;
+    --bor: #b8a4f5;
+    --bor-fill: #342a52;
+    --chr: #f58aa7;
+    --chr-fill: #4c2332;
+    --press: #7cc48f;
+    --hatch: #2c323c;
+  }
+}
+
+/* The theme button starts on auto, which leaves data-theme unset and follows the OS. A click sets
+   the theme the page is not showing; the choice lasts only for this page view. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #161a21;
+  --sheet: #1d222b;
+  --cell: #2a303b;
+  --ink: #e6e8e3;
+  --pencil: #9aa1ad;
+  --rule: #3a414e;
+
+  --sec: #f0b54a;
+  --sec-fill: #463619;
+  --bor: #b8a4f5;
+  --bor-fill: #342a52;
+  --chr: #f58aa7;
+  --chr-fill: #4c2332;
+  --press: #7cc48f;
+  --hatch: #2c323c;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The timeline and transport sit at the bottom of the window; the current chord takes the rest. */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+code {
+  font: 0.9em ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+kbd {
+  font: 12px var(--sans);
+  padding: 0 0.35em;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--sheet);
+  color: var(--ink);
+}
+
+.button {
+  font: inherit;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+/* Hover is a light tint on every button: a filled face means a toggle that is on, or Save with
+   edits unsaved, nothing else. */
+.button:hover {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+
+/* Greyed, hover included. Still focusable: see setButton in app.js. */
+.button[aria-disabled="true"] {
+  color: var(--pencil);
+  border-color: var(--rule);
+  background: transparent;
+  cursor: default;
+}
+
+/* Header */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 8px 32px;
+  /* As tall with Open files hidden (the empty state) as with it. */
+  min-height: 36px;
+  padding: 14px 32px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.wordmark {
+  flex: none;
+  margin: 0;
+  font: 400 26.7px/1 var(--serif);
+  letter-spacing: -0.01em;
+}
+
+.files {
+  display: flex;
+  flex: 0 1 auto;
+  gap: 8px 24px;
+  min-width: 0;
+  margin: 0;
+}
+
+.files div {
+  min-width: 0;
+}
+
+.files dt {
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+/* The name's head gives way to an ellipsis; its tail (see showName) always shows. */
+.files dd {
+  display: flex;
+  max-width: 40ch;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.files dd span:first-child {
+  min-width: 1.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.files dd span:last-child {
+  flex: none;
+}
+
+.privacy {
+  flex: 0 1 auto;
+  min-width: 11rem;
+  margin: 0 0 0 auto;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: right;
+  text-wrap: balance;
+  color: var(--pencil);
+}
+
+.bar .button {
+  flex: none;
+}
+
+.repo {
+  flex: none;
+  font-size: 13px;
+  color: var(--pencil);
+  text-underline-offset: 2px;
+}
+
+.empty a,
+.no-audio a {
+  color: inherit;
+  text-underline-offset: 2px;
+}
+
+.status {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin: 16px 32px 0;
+  padding: 10px 10px 10px 14px;
+  max-width: 72ch;
+  background: var(--sheet);
+  border-left: 3px solid var(--ink);
+}
+
+#messages {
+  flex: 1;
+}
+
+.status p {
+  margin: 0;
+}
+
+.status p + p {
+  margin-top: 6px;
+}
+
+.dismiss {
+  flex: none;
+  padding: 0 4px;
+  font: 13px var(--sans);
+  color: var(--pencil);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* The empty state has its own Open files button; one is enough. */
+body:has(#empty:not([hidden])) .bar .open-files {
+  display: none;
+}
+
+body:has(#empty:not([hidden])) .status {
+  box-sizing: border-box;
+  width: 36rem;
+  max-width: calc(100% - 32px);
+  margin-inline: auto;
+}
+
+/* Before anything is open: what the page does, a sample of its strip, and how to get a timeline.
+   Only the action carries the dashed edge, the cut line the whole page drops onto. */
+
+.empty {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 40rem;
+  margin: clamp(48px, 12vh, 120px) auto auto;
+  padding: 0 32px 48px;
+}
+
+.empty h1 {
+  margin: 0 0 20px;
+  font: 400 47.4px/1.1 var(--serif);
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+
+.lede {
+  margin: 0 0 28px;
+  font-size: 20px;
+  line-height: 1.45;
+}
+
+/* The strip's own cells, laid out in a row instead of on the beat grid. */
+.sample {
+  display: flex;
+  height: 90px;
+  margin: 0 0 28px;
+  overflow: hidden;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.sample .segment {
+  position: static;
+  flex: 1;
+  cursor: default;
+}
+
+.sample sup {
+  font-size: 0.62em;
+}
+
+.steps {
+  margin: 0 0 28px;
+  padding-left: 1.4em;
+  font-size: 16px;
+}
+
+.steps li + li {
+  margin-top: 8px;
+}
+
+.steps li::marker {
+  font-family: var(--serif);
+  color: var(--pencil);
+}
+
+.empty code {
+  padding: 0 0.3em;
+  background: var(--cell);
+  border-radius: 3px;
+}
+
+.drop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 20px 24px;
+  color: var(--pencil);
+  border: 1.5px dashed var(--pencil);
+  border-radius: 6px;
+}
+
+.drop .button {
+  padding: 9px 20px;
+  font-size: 16px;
+}
+
+/* The current chord */
+
+.viewer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.now {
+  flex: 1;
+  display: grid;
+  /* A fixed chord column, wide enough for E♭7/B♭, so the facts don't shift with each name. */
+  grid-template-columns: 26rem minmax(0, 1fr) 22rem 17rem;
+  grid-template-areas: "chord facts piano key";
+  align-items: center;
+  align-content: center;
+  gap: 24px 40px;
+  padding: 28px 32px;
+}
+
+/* Each role has a colour and a mark of its own (solid, dashed, double), so the roles stay apart
+   without colour vision too. */
+[data-role="secondary_dominant"] {
+  --role: var(--sec);
+  --role-fill: var(--sec-fill);
+  --mark: linear-gradient(var(--sec), var(--sec));
+  --mark-height: 4px;
+}
+
+[data-role="borrowed"] {
+  --role: var(--bor);
+  --role-fill: var(--bor-fill);
+  --mark: repeating-linear-gradient(90deg, var(--bor) 0 7px, transparent 7px 11px);
+  --mark-height: 4px;
+}
+
+[data-role="chromatic"] {
+  --role: var(--chr);
+  --role-fill: var(--chr-fill);
+  --mark: linear-gradient(var(--chr) 0 2px, transparent 2px 4px, var(--chr) 4px 6px);
+  --mark-height: 6px;
+}
+
+/* The Edited badge shares the numeral's line, so showing it moves nothing. */
+.now-chord {
+  grid-area: chord;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The ellipsis needs overflow hidden, which clips at the padding box, and at line-height 1 a
+   descender (the g of Ebaug, the j of Cmaj7) hangs about 0.11em below the line. The padding takes
+   it in and the negative margin gives the space back, so nothing below moves. */
+.big-chord {
+  flex: 0 0 100%;
+  margin: 0 0 -0.2em;
+  padding-bottom: 0.2em;
+  font: 400 112px/1 var(--serif);
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.now[data-role="none"] .big-chord {
+  color: var(--pencil);
+}
+
+.big-numeral {
+  min-height: 1.2em;
+  margin: 10px 0 0;
+  font: 400 47.4px/1.2 var(--serif);
+  color: var(--role, var(--ink));
+}
+
+/* Quiet, with the turned-down corner that marks an edited chord in the strip. */
+.badge {
+  position: relative;
+  margin: 10px 0 0 16px;
+  padding: 1px 14px 1px 8px;
+  border: 1px solid var(--pencil);
+  border-radius: 3px 0 3px 3px;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+.badge::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  background: linear-gradient(to bottom left, var(--ink) 50%, transparent 50%);
+}
+
+/* No numeral (N.C.): the badge starts the line. */
+.big-numeral:empty + .badge {
+  margin-left: 0;
+}
+
+.figures {
+  display: inline-flex;
+  flex-direction: column;
+  vertical-align: top;
+  margin: 0.08em 0.04em 0 0.06em;
+  font-size: 0.48em;
+  line-height: 1;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+.facts {
+  grid-area: facts;
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr);
+  row-gap: 6px;
+  margin: 0;
+}
+
+.facts div {
+  display: contents;
+}
+
+.facts dt {
+  color: var(--pencil);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+#now-role {
+  color: var(--role, var(--ink));
+}
+
+/* Compact, so a row of them stays the height of a line of text. */
+.candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+}
+
+.candidate {
+  padding: 0 8px;
+  line-height: 1.3;
+}
+
+/* The current chord's keys, in the fixed C3-C5 frame with the chord placed around middle C. The
+   height is fixed and the width follows the keys drawn, so a chord the frame cannot hold — one
+   wider than two octaves, or one whose notes have no octave inside it — draws its keys smaller.
+   The stack holds chordotomy's keys and, in dual view, ChordFormer's under them. */
+.chord-keys-stack {
+  grid-area: piano;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 24px;
+  min-width: 0;
+}
+
+.chord-keys {
+  display: flex;
+  justify-content: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.chord-keys svg {
+  display: block;
+  width: auto;
+  height: 138px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* pianokeys paints each key's fill as an attribute; the page's own inks win over it. A key of the
+   current chord is green, whatever the chord's role. */
+.chord-keys svg rect {
+  stroke: var(--rule);
+}
+
+.chord-keys svg rect[fill="white"] {
+  fill: var(--sheet);
+}
+
+.chord-keys svg rect[fill="black"] {
+  fill: var(--ink);
+}
+
+.chord-keys svg rect[fill="hl"] {
+  fill: var(--press);
+}
+
+.chord-keys-former svg rect[fill="former"] {
+  fill: var(--press-former);
+}
+
+/* Dual view keeps both slots whether or not ChordFormer's picture is showing, so chordotomy's keys
+   stay put when the two readings match. The stack has no height of its own, so the two pictures
+   overflow around the row's centre without making the row taller: the chord, facts and key stay
+   where they were. */
+.now[data-dual="true"] .chord-keys-stack {
+  display: grid;
+  grid-template-rows: 138px 138px;
+  gap: 24px;
+  align-content: center;
+  height: 0;
+  min-height: 0;
+}
+
+.now[data-dual="true"] #chord-keys {
+  grid-row: 1;
+}
+
+.now[data-dual="true"] #chord-keys-former {
+  grid-row: 2;
+}
+
+.key {
+  grid-area: key;
+  padding-left: 28px;
+  border-left: 1px solid var(--rule);
+}
+
+.key-label {
+  margin: 0;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+.key-name {
+  margin: 2px 0 4px;
+  font: 400 35.5px/1.15 var(--serif);
+}
+
+.key-select {
+  margin: 4px 0 14px;
+}
+
+.key-source {
+  margin: 0 0 18px;
+}
+
+.key-candidates {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style-position: inside;
+}
+
+/* A timeline, not a ranking: no ordinals. */
+.key-regions {
+  margin: 4px 0 18px;
+  padding: 0;
+  list-style: none;
+}
+
+/* Editing the current chord */
+
+.editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 0 32px 16px;
+}
+
+.pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+/* Drawn like the buttons, with the browser's own menu and arrow. */
+.pick select,
+.key-select {
+  font: 15px/1.5 var(--sans);
+  color: var(--ink);
+  background-color: transparent;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.pick select:hover,
+.key-select:hover {
+  background-color: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+
+/* Split, merge, delete, undo and redo: one wrapping row after the pickers. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Saving acts on the file, not the chord, so it stands apart at the end of the row. */
+.save {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.unsaved {
+  margin: 0;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+/* Hidden, the status text keeps its room, so the first edit or a save never rewraps the row. */
+.unsaved[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
+/* Timeline */
+
+.timeline {
+  padding: 0 32px;
+}
+
+.strip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.track {
+  position: relative;
+  height: 122px;
+  min-width: 100%;
+}
+
+.segments {
+  position: absolute;
+  inset: 0 0 32px;
+}
+
+.segment {
+  --under: transparent;
+  --under-height: 4px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 11px 8px 8px;
+  border: 0;
+  border-right: 2px solid var(--sheet);
+  background:
+    var(--mark, none) top / 100% var(--mark-height, 0) no-repeat,
+    var(--role-fill, var(--cell));
+  box-shadow: inset 0 calc(-1 * var(--under-height)) 0 var(--under);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* clip, not hidden: hidden would make each segment a scroller and stop the sticky labels. */
+  overflow: clip;
+  container-type: inline-size;
+}
+
+/* No chord: hatched and quiet, so a long silence reads as a gap rather than a chord. */
+.segment[data-role="none"] {
+  background: repeating-linear-gradient(-45deg, var(--sheet) 0 5px, var(--hatch) 5px 6px);
+  color: var(--pencil);
+}
+
+.segment:hover {
+  --under: var(--pencil);
+  --under-height: 2px;
+}
+
+.segment.current {
+  --under: var(--ink);
+  --under-height: 4px;
+}
+
+.segment:focus-visible {
+  outline-offset: -5px;
+}
+
+/* A chord the user set: its corner turned down in ink, over any role's colour or hatching. */
+.segment[data-edited]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 12px;
+  height: 12px;
+  background: linear-gradient(to bottom left, var(--ink) 50%, transparent 50%);
+}
+
+/* Labels stay in view while the start of a long chord is scrolled off to the left. */
+.segment-chord,
+.segment-numeral {
+  position: sticky;
+  left: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--serif);
+}
+
+/* Line heights in px, so the smaller type of a narrow segment keeps its neighbours' rows. A slash
+   chord too long for its cell wraps before the slash, the one break app.js allows; its two lines
+   and the numeral just fill the cell. */
+.segment-chord {
+  font-size: 20px;
+  line-height: 24px;
+  white-space: normal;
+}
+
+.segment-chord span {
+  white-space: nowrap;
+}
+
+.segment-numeral {
+  font-size: 18px;
+  line-height: 23px;
+  color: var(--role, var(--pencil));
+}
+
+/* Stacked figures at the big numeral's ratio would be 8px here. */
+.segment-numeral .figures {
+  font-size: 0.62em;
+}
+
+.segment[data-role="none"] .segment-chord {
+  font-size: 15px;
+}
+
+/* A one-beat chord at a quick tempo: smaller type, so a slash chord keeps its bass. */
+@container (max-width: 72px) {
+  .segment-chord {
+    font-size: 16px;
+  }
+
+  .segment-numeral {
+    font-size: 15px;
+  }
+
+  .segment-numeral.long {
+    font-size: 14px;
+  }
+}
+
+/* The six-character heads (D♯m7♭5, B♭maj7) take about 74px at 20px and 59px at 16px, so they step
+   down in wider cells than the other names do. */
+@container (max-width: 80px) {
+  .segment-chord.long {
+    font-size: 16px;
+  }
+}
+
+@container (max-width: 64px) {
+  .segment-chord.long {
+    font-size: 14px;
+  }
+}
+
+.ruler {
+  position: absolute;
+  inset: auto 0 0;
+  height: 32px;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+  color: var(--pencil);
+  font-variant-numeric: tabular-nums;
+}
+
+.ruler i {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 6px;
+  background: var(--pencil);
+  opacity: 0.6;
+}
+
+/* A time label starts at its moment; the ticks are the beats, one system of marks. */
+.ruler span {
+  position: absolute;
+  top: 9px;
+  line-height: 1.2;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: var(--ink);
+  pointer-events: none;
+}
+
+/* The lab file's chords: a second, independent reading of the song, in their own strip under the
+   timeline's and on its beat grid. The cells stay grey — on this page a colour means a harmonic
+   role, and the lab's chords have none — so the row reads as marks beside the timeline's cells,
+   not as more of them. One chord a cell, as the lab writes them, so no numeral row. */
+.lab-title {
+  margin: 16px 0 6px;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+/* This row keeps the strip's own scrolling, as the timeline's does, so either strip can be
+   dragged; app.js keeps the two in step. */
+
+.lab-track {
+  height: 52px;
+}
+
+.lab-segments {
+  inset: 0;
+}
+
+.lab-segment {
+  justify-content: center;
+  padding: 8px;
+  background: var(--sheet);
+  border-right-color: var(--rule);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin: 0;
+  padding: 10px 0 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+.legend li::before {
+  content: "";
+  display: inline-block;
+  box-sizing: border-box;
+  width: 20px;
+  height: 14px;
+  margin-right: 7px;
+  vertical-align: -2px;
+  background:
+    var(--mark, none) top / 100% var(--mark-height, 0) no-repeat,
+    var(--role-fill, var(--cell));
+  border: 1px solid var(--rule);
+}
+
+.legend [data-role="none"]::before {
+  background: repeating-linear-gradient(-45deg, var(--sheet) 0 3px, var(--hatch) 3px 4px);
+}
+
+/* A plain cell with the corner an edited chord has in the strip. */
+.legend .edited::before {
+  background:
+    linear-gradient(to bottom left, var(--ink) 50%, transparent 50%) top right / 8px 8px no-repeat,
+    var(--cell);
+}
+
+/* Playback */
+
+/* Gaps step 8 / 16 / 28: within a control, between controls, between groups. */
+.transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+  padding: 16px 32px 20px;
+}
+
+/* The player keeps room for a usable seek bar; the controls beside it wrap below before it
+   shrinks that far. */
+.transport audio {
+  flex: 1 1 24rem;
+  min-width: min(100%, 34rem);
+  /* The focus ring follows the rounded player instead of boxing it. */
+  border-radius: 28px;
+}
+
+.transport p {
+  margin: 0;
+  color: var(--pencil);
+}
+
+.no-audio {
+  flex: 1 1 28rem;
+}
+
+.no-audio a {
+  overflow-wrap: anywhere;
+}
+
+/* Mute recording sits by the player it acts on; the chord controls form a group of their own. */
+.listen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+}
+
+.listen-chords {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding-left: 28px;
+  border-left: 1px solid var(--rule);
+}
+
+/* Without a recording there is no Mute for the divider to set the chord group apart from. */
+#mute-recording[hidden] + .listen-chords {
+  padding-left: 0;
+  border-left: 0;
+}
+
+/* A toggle shows its state with a dot, hollow when off and filled when on. On also takes the
+   ink underline that marks the current chord in the timeline: a mode that may stay on for
+   minutes shouldn't outweigh the chords it is there to check. Save takes the same face and
+   underline while there are unsaved edits, so they show without reading the text beside it. */
+.toggle::before {
+  content: "";
+  display: inline-block;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+
+.toggle[aria-pressed="true"],
+.save:has(#unsaved:not([hidden])) .button {
+  background: var(--sheet);
+  box-shadow: inset 0 -3px 0 var(--ink);
+}
+
+.toggle[aria-pressed="true"]:hover,
+.save:has(#unsaved:not([hidden])) .button:hover {
+  background: color-mix(in srgb, var(--ink) 8%, var(--sheet));
+}
+
+.toggle[aria-pressed="true"]::before {
+  background: currentColor;
+}
+
+.volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--pencil);
+}
+
+/* Still adjustable while the chords are off, but it shouldn't be the heaviest mark in the row. */
+.listen:has(#play-chords[aria-pressed="false"]) .volume {
+  opacity: 0.55;
+}
+
+.volume input {
+  width: 7rem;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+/* One key and what it does never break apart; the gaps separate the pairs. */
+.transport .keys {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13px;
+}
+
+.keys span {
+  white-space: nowrap;
+}
+
+.dropzone {
+  position: fixed;
+  inset: 12px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--ink);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 90%, transparent);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.dropzone p {
+  font: 400 35.5px/1.2 var(--serif);
+}
+
+/* The keyboard's column is the widest of the four, so the four-column layout waits for the width to
+   hold it, the chord and the key column at once. */
+@media (max-width: 1480px) {
+  .now {
+    grid-template-columns: minmax(0, 1fr) 17rem;
+    grid-template-areas:
+      "chord key"
+      "facts key"
+      "piano key";
+  }
+
+  .big-chord {
+    font-size: 84px;
+  }
+
+  .big-numeral {
+    font-size: 35.5px;
+  }
+}
+
+@media (max-width: 760px) {
+  .bar {
+    flex-wrap: wrap;
+  }
+
+  .bar,
+  .now,
+  .editor,
+  .timeline,
+  .transport {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* The pickers stack full width, their selects lined up with the facts' values above. */
+  .editor {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .pick {
+    display: grid;
+    grid-template-columns: 8rem minmax(0, 1fr);
+    gap: 0;
+  }
+
+  /* Two rows of three equal columns under the pickers, at every width below 760px. */
+  .actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 8px;
+  }
+
+  .actions .button {
+    padding-inline: 8px;
+  }
+
+  .key-select {
+    width: 100%;
+  }
+
+  .privacy {
+    order: 3;
+    flex-basis: 100%;
+    margin-left: 0;
+    text-align: left;
+  }
+
+  .bar {
+    gap: 8px 16px;
+  }
+
+  /* GitHub and Open files share the wordmark's row, opposite it. */
+  .repo {
+    margin-left: auto;
+  }
+
+  .files {
+    order: 2;
+    flex-basis: 100%;
+  }
+
+  /* The chord group wraps under Mute here, so a divider would hang in mid-air. */
+  .listen-chords {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .now {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "chord" "facts" "piano" "key";
+  }
+
+  .big-chord {
+    font-size: 84px;
+  }
+
+  .key {
+    padding: 20px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .empty {
+    margin: 32px auto auto;
+    padding: 0 16px 32px;
+  }
+
+  .empty h1 {
+    font-size: 35.5px;
+  }
+}

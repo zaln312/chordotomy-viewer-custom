@@ -1,0 +1,1652 @@
+// The viewer's DOM side: opening files, the timeline, the current-chord panel, editing and
+// playback. A classic script like core.js (see there for why). The scripts are deferred, so they
+// run in document order: harmony.js, core.js, edit.js, then this one.
+"use strict";
+
+(() => {
+  const PX_PER_BEAT = 76;
+  const RULER_STEP = 5; // seconds between time labels
+  // Reading currentTime back can land a hair before the value just set, which would light up the
+  // previous segment.
+  const SEEK_NUDGE = 0.001;
+  const AUDIO_NAME = /\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|webm)$/i;
+  // A chord timeline from another tool, shown beside the viewer's own: chordino's `.lab`, and the
+  // plain text a lab is often saved as.
+  const LAB_NAME = /\.(lab|txt)$/i;
+  // Hearing the chords: every TICK_MS, notes due in the next LOOKAHEAD seconds are scheduled on
+  // the AudioContext clock, mapped from the recording's currentTime. Timers are too coarse to
+  // start notes on time themselves; the audio clock isn't.
+  const TICK_MS = 50;
+  const LOOKAHEAD = 0.15;
+  const ATTACK = 0.012;
+  const RELEASE = 0.02; // time constant of the fade just before the next beat
+  // The chord picture is drawn in pianokeys' own numbering, where C4 is 48 (its middle C, the key
+  // it marks with a dot) and a note's number is its pitch class plus twelve times its octave.
+  const KEYS_C = 48; // pianokeys' middle C, the note the picture's chord is placed around
+  // The picture's fixed frame, C3-C5. A chord is drawn inside it whenever its notes can be placed
+  // there: they are moved by whole octaves to sit around C4 within it, and only a chord that does
+  // not fit moves the frame's edges (nearMiddleC, keyRange).
+  const KEY_FIXED_LOW = 36; // C3
+  const KEY_FIXED_HIGH = 60; // C5
+  const KEY_LETTERS = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
+  const keyNoteName = (note) => `${KEY_LETTERS[note % 12]}${Math.floor(note / 12)}`;
+  const WHITE_PITCHES = [0, 2, 4, 5, 7, 9, 11];
+  // The white key beside `note` in each direction: a keyboard's two edges, one key past the chord's
+  // own keys. A white note is passed over rather than met, so a chord already ending on one still
+  // has a white key of context beyond it.
+  const whiteKeyBelow = (note) => {
+    let n = note - 1;
+    while (!WHITE_PITCHES.includes(n % 12)) n -= 1;
+    return n;
+  };
+  const whiteKeyAbove = (note) => {
+    let n = note + 1;
+    while (!WHITE_PITCHES.includes(n % 12)) n += 1;
+    return n;
+  };
+  const INVERSION_TEXT = {
+    root: "root position",
+    first: "first inversion",
+    second: "second inversion",
+    third: "third inversion",
+    non_chord: "not a chord tone",
+  };
+  // Screen readers would say "degree" for °, "o with stroke" for ø, and read ivadd6 as one word.
+  // Keyed by the numeral's suffix, not its marker: vii° and vii°7 share the °.
+  const QUALITY_WORDS = {
+    maj7: "major seventh",
+    "ø7": "half-diminished seventh",
+    "°7": "diminished seventh",
+    "°": "diminished",
+    "+": "augmented",
+    add6: "add 6",
+    add9: "add 9",
+    sus4: "sus 4",
+    sus2: "sus 2",
+    "7sus4": "seven sus 4",
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const audio = $("audio");
+  const strip = $("strip");
+  const picker = $("picker");
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const darkTheme = matchMedia("(prefers-color-scheme: dark)");
+
+  // Every edit is a step in `history` (see Edit.history), and `timeline` is its present, set only
+  // by refreshView. `saved` is the timeline as last opened or saved, and `timelineName` the name
+  // of the opened file, which the saved file's name comes from.
+  let history = null;
+  let saved = null;
+  let timeline = null;
+  let timelineName = null;
+  // The open lab file's chords (Core.parseLab) and its name: another tool's reading of the same
+  // song, drawn in a strip of its own (renderLab). Never edited, saved or played.
+  let lab = null;
+  let labName = null;
+  // Dual view shows ChordFormer's keys under chordotomy's while the two current chords differ.
+  // `formerSignature` keeps that picture from being rebuilt on every playback frame.
+  let dualView = false;
+  let formerSignature = null;
+  // null is auto, following the OS; "light" and "dark" are the button's own choices, for this page
+  // view only.
+  let themeChoice = null;
+  // Counts the batches of files taken; one still reading its timeline gives way to a later one.
+  let latestBatch = 0;
+  // While a select of the picker has focus or the pointer is pressed on it, the index of the
+  // segment that was current when that began; null otherwise. Playback moving on then neither
+  // rewrites the picker nor moves its edits to the next chord.
+  let pinned = null;
+  let xAt = null; // a time's x on the strip, set by renderTimeline
+  let buttons = [];
+  let current = null;
+  let tabStop = null;
+  let audioUrl = null;
+  let standIn = false; // the player holds a silent track, not a recording (see loadTrack)
+  let looping = false;
+  let turnTarget = 0;
+  let turnUntil = 0;
+  let chordStrikes = [];
+  let chordVoicings = [];
+  let playChords = false;
+  let context = null;
+  let chordBus = null;
+  let session = null; // the notes of one unbroken stretch of playback, faded out together
+  let audition = null; // a chord sounded once while paused
+  let ticker = null;
+  let nextStrike = 0;
+
+  // Messages add up while one batch of files loads, so a skipped file isn't hidden by an error.
+  function say(text) {
+    const line = document.createElement("p");
+    line.textContent = text;
+    $("messages").append(line);
+    $("status").hidden = false;
+  }
+
+  function clearMessages() {
+    $("messages").replaceChildren();
+    $("status").hidden = true;
+  }
+
+  // A batch of dropped or picked files opens whole or not at all, so the recording and the
+  // timeline shown are always a pair the user chose together. Its timeline is read and checked
+  // before anything changes, and unsaved edits go only when the user says so. A recording on its
+  // own replaces just the recording, which loses no edit; a lab file joins the timeline it came
+  // with, and waits for one when it comes alone.
+  async function takeFiles(list) {
+    // Copied before the first await: the picker empties its live list right after this call.
+    const files = [...list];
+    clearMessages();
+    let recording = null;
+    let timelineFile = null;
+    let labFile = null;
+    const unknown = [];
+    const extra = [];
+    for (const file of files) {
+      if (/\.json$/i.test(file.name) || file.type === "application/json") {
+        if (timelineFile) extra.push(file.name);
+        else timelineFile = file;
+      } else if (LAB_NAME.test(file.name)) {
+        if (labFile) extra.push(file.name);
+        else labFile = file;
+      } else if (file.type.startsWith("audio/") || AUDIO_NAME.test(file.name)) {
+        if (recording) extra.push(file.name);
+        else recording = file;
+      } else {
+        unknown.push(file.name);
+      }
+    }
+    if (unknown.length) {
+      say(`Skipped ${unknown.join(", ")}: not a recording, a .chords.json or a .lab.`);
+    }
+    if (extra.length) {
+      say(`Skipped ${extra.join(", ")}: one recording, one timeline and one lab at a time.`);
+    }
+    // Only a batch with something to open takes over from one still being read.
+    if (!recording && !timelineFile && !labFile) return;
+    const batch = ++latestBatch;
+    let opened = null;
+    let openedLab = null;
+    if (timelineFile) {
+      const read = await readTimeline(timelineFile);
+      if (batch !== latestBatch) return;
+      if (read.problem) {
+        say(read.problem);
+        return;
+      }
+      opened = read.timeline;
+      const names = [recording, timelineFile].filter(Boolean).map((file) => file.name);
+      if (dirty() && !confirm(`Discard unsaved edits and open ${names.join(" and ")}?`)) {
+        say(`Didn't open ${names.join(" and ")}: kept the unsaved edits.`);
+        return;
+      }
+    }
+    if (labFile) {
+      const read = await readLab(labFile);
+      if (batch !== latestBatch) return;
+      // A lab is a second reading of the song beside the timeline, not the timeline itself, so one
+      // that can't be read is reported and the rest of the batch still opens.
+      if (read.problem) say(read.problem);
+      else openedLab = { segments: read.segments, name: labFile.name };
+    }
+    if (recording) loadAudio(recording);
+    if (opened) installTimeline(opened, timelineFile.name);
+    if (openedLab) installLab(openedLab.segments, openedLab.name);
+    // Once the batch is in place, and never between the two: a lab opened with its timeline is
+    // checked against that timeline, not against the one it replaces.
+    if (opened || openedLab) checkLab();
+  }
+
+  // The timeline in `file`, checked and upgraded to schema 11, or the reason it can't be shown.
+  async function readTimeline(file) {
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch (error) {
+      return { problem: `Couldn't read ${file.name} as JSON (${error.message}).` };
+    }
+    // A file the checks didn't foresee can make them throw; that too opens nothing.
+    try {
+      const problem = Core.timelineProblem(data);
+      if (problem) return { problem: `${file.name}: ${problem}` };
+      // Opening doesn't re-analyze: the analyzer's fields stand until the first edit.
+      return { timeline: Edit.upgrade(data) };
+    } catch (error) {
+      return { problem: `${file.name}: This timeline can't be shown (${error.message}).` };
+    }
+  }
+
+  // The chords in a lab file, read as text, or the reason it can't be shown.
+  async function readLab(file) {
+    let text;
+    try {
+      text = await file.text();
+    } catch (error) {
+      return { problem: `Couldn't read ${file.name} (${error.message}).` };
+    }
+    const read = Core.parseLab(text);
+    return read.problem ? { problem: `${file.name}: ${read.problem}` } : read;
+  }
+
+  // A long name is cut before its extensions, which always show: they are where a recording and
+  // its timeline differ (.mp3, .chords.json, .prototype.chords.json). A `note` after the name
+  // always shows too.
+  function showName(id, name, note = "") {
+    const extensions = /(\.[^.\s]+)+$/.exec(name);
+    const cut = extensions ? extensions.index : name.length;
+    const head = document.createElement("span");
+    const tail = document.createElement("span");
+    head.textContent = name.slice(0, cut);
+    tail.textContent = name.slice(cut) + (note && ` · ${note}`);
+    $(id).replaceChildren(head, tail);
+    $(id).title = name;
+    $("files").hidden = false;
+  }
+
+  // Once a timeline is open the player always has something to play: the recording or, until one
+  // is opened, a silent track as long as the timeline (Core.silentWav). The playhead, seeking, the
+  // rate and the chord sound then run on the player's clock either way.
+  function loadTrack(blob, silent) {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    audioUrl = URL.createObjectURL(blob);
+    audio.src = audioUrl;
+    standIn = silent;
+    audio.hidden = false;
+    $("listen").hidden = false;
+    $("chords-key").hidden = false;
+    // Muting a silent track would do nothing.
+    $("mute-recording").hidden = silent;
+    $("mute-key").hidden = silent;
+  }
+
+  // The chords the stand-in turned on go off with it, so a recording starts as it does when it is
+  // opened first: on its own.
+  function loadAudio(file) {
+    if (standIn && playChords) setPlayChords(false);
+    loadTrack(file, false);
+    $("no-audio").hidden = true;
+    $("source").hidden = true;
+    showName("audio-name", file.name);
+  }
+
+  // The first stand-in turns the chords on, since a silent track without them plays nothing; one
+  // remade for the next timeline keeps the user's choice. They sound from the first play, not
+  // now: opening a file shouldn't make a noise.
+  function loadStandIn(duration) {
+    const first = !audioUrl;
+    loadTrack(new Blob([Core.silentWav(duration)], { type: "audio/wav" }), true);
+    if (first) {
+      playChords = true;
+      $("play-chords").setAttribute("aria-pressed", "true");
+    }
+  }
+
+  // A timeline from readTimeline, shown with a fresh history and nothing unsaved.
+  function installTimeline(opened, name) {
+    // A new timeline ends a pick in progress: the picker's pinned segment belongs to the old one.
+    if ($("editor").contains(document.activeElement)) document.activeElement.blur();
+    // A recording that is open stays; a stand-in is remade, as long as the new timeline. First,
+    // so a duration too long to build one changes nothing.
+    if (!audioUrl || standIn) loadStandIn(opened.source.duration);
+    history = Edit.history(opened);
+    saved = opened;
+    timelineName = name;
+    showName("json-name", name, Core.engineText(opened));
+    $("empty").hidden = true;
+    $("viewer").hidden = false;
+    strip.scrollLeft = 0;
+    refreshView();
+    renderSource();
+    checkDurations();
+  }
+
+  // A lab file from another tool, drawn in its own strip under the timeline's (renderLab). It is
+  // read and shown, never edited, saved or sounded, so it has no history of its own.
+  function installLab(segments, name) {
+    lab = segments;
+    labName = name;
+    formerSignature = null;
+    const count = segments.length;
+    showName("lab-name", name, `${count} ${count === 1 ? "chord" : "chords"}`);
+    $("lab-file").hidden = false;
+    // The strip is drawn on the timeline's beat grid, so without one the lab waits for it: say so
+    // rather than show a strip with no scale.
+    if (timeline) {
+      renderLab();
+      renderFormerKeys();
+    }
+    else {
+      say("The lab's chords are ready. Open their .chords.json too, to draw them on the beat grid.");
+    }
+  }
+
+  // Edits since the timeline was opened or last saved. Undoing back to that point gives back the
+  // very object `saved` holds (see Edit.history), so that is clean again.
+  function dirty() {
+    return history !== null && history.present !== saved;
+  }
+
+  // Saving downloads a new file named after the recording (Edit.saveName): the page never writes
+  // to the file it opened, so what the analyzer wrote stays as it was. The object URL is revoked
+  // a tick later, once the download has started.
+  function save() {
+    const name = Edit.saveName(history.present, timelineName);
+    const blob = new Blob([Edit.serialize(history.present)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url));
+    saved = history.present;
+    refreshEditor();
+    $("announce").textContent = `Saved ${name}`;
+  }
+
+  // Draw everything that comes from the timeline again, from history.present: after opening a
+  // file, an edit, or a step through the history. The strip keeps its scroll position, a focused
+  // chord keeps the focus, and the chord sound picks up from where the recording is.
+  function refreshView(announcement = "") {
+    timeline = history.present;
+    chordStrikes = Core.strikes(timeline);
+    chordVoicings = Core.voicings(timeline.segments);
+    // Mid-play, the strike under way starts again at once with what is left of it, so an edit to
+    // the chord sounding now is heard right away. Paused, a chord still sounding from a click or
+    // an edit is the old timeline's, so it stops; commitEdit and stepHistory sound the new one.
+    stopChords();
+    if (audition) fadeOut(audition);
+    audition = null;
+    startChords();
+    renderKey();
+    const focused = strip.contains(document.activeElement);
+    renderTimeline();
+    // The pin lasts only while a picker select has focus. A touch that scrolls the page from a
+    // select pins it without focusing it, and an edit can move the segments under a stale pin.
+    if (!document.activeElement.closest(".pick")) pinned = null;
+    current = null;
+    update();
+    if (focused && buttons[current]) buttons[current].focus({ preventScroll: true });
+    $("announce").textContent = announcement;
+  }
+
+  // The one way an edit enters the history. Undo and redo step through it without this, so they
+  // never add a step or clear what there is to redo. Paused with the chords on, the chord now in
+  // place sounds once, as a click on it would.
+  function commitEdit(next, announcement) {
+    if (next === history.present) return;
+    history = Edit.commit(history, next);
+    refreshView(announcement);
+    auditionChord(current);
+  }
+
+  // Undo (Edit.undo) or redo (Edit.redo), announced as `verb` with the chord now under the
+  // playhead. With nothing to step to, nothing changes. Paused with the chords on, that chord
+  // sounds once, as after an edit.
+  function stepHistory(move, verb) {
+    const next = move(history);
+    if (next === history) return;
+    history = next;
+    refreshView();
+    const segment = timeline.segments[current];
+    $("announce").textContent = segment ? `${verb}: ${nameOf(segment)}` : verb;
+    auditionChord(current);
+  }
+
+  // The key in force at a segment of `tl`: its region's. A given key, or a timeline with no
+  // regions, has only `tl.global_key`.
+  function segmentKey(segment, tl = timeline) {
+    return Core.keyAt(tl.key_regions, segment.start_beat) ?? tl.global_key?.label ?? null;
+  }
+
+  // A segment's chord as the strip names it, in the key in force.
+  function nameOf(segment, tl = timeline) {
+    const key = segmentKey(segment, tl);
+    return Core.chordName(segment.chord, key, segment.bass, segment.inversion);
+  }
+
+  // The beat under the playhead at time `t`, when it lies strictly inside the chord there: the
+  // one place a split can go. Null on a chord's first beat, before the first beat, and in a
+  // one-beat chord.
+  function splitPoint(t = now()) {
+    const index = currentIndex(t);
+    const segment = timeline.segments[index];
+    const beat = Core.beatIndexAt(timeline.beats, t);
+    if (!segment || beat <= segment.start_beat || beat >= segment.end_beat) return null;
+    return { index, beat };
+  }
+
+  function splitAt(t) {
+    const point = splitPoint(t);
+    if (!point) return;
+    const name = nameOf(timeline.segments[point.index]);
+    const next = Edit.split(timeline, point.index, point.beat);
+    commitEdit(next, `Split ${name} at beat ${point.beat + 1}`);
+  }
+
+  // The chord at `index` merged with the one before (`step` -1) or after (1); the chord at `index`
+  // keeps its chord and bass over both spans.
+  function mergeWith(index, step) {
+    const survivor = timeline.segments[index];
+    const other = timeline.segments[index + step];
+    if (!survivor || !other) return;
+    const next = Edit.merge(timeline, index, index + step);
+    commitEdit(next, `Merged ${nameOf(survivor)} with ${nameOf(other)}`);
+  }
+
+  function deleteAt(index) {
+    const segment = timeline.segments[index];
+    if (segment) commitEdit(Edit.remove(timeline, index), `Deleted ${nameOf(segment)}`);
+  }
+
+  // The key select: a label fixes the key, "" (Estimated) estimates it again.
+  function setKey(label) {
+    const next = Edit.setKey(timeline, label || null);
+    const name = next.global_key ? Core.keyName(next.global_key.label) : "none";
+    commitEdit(next, label ? `Key set to ${name}` : `Key estimated: ${name}`);
+  }
+
+  // A segment's chord and bass, as the picker or a candidate sets them.
+  function setChord(index, chord, bass) {
+    const next = Edit.setChord(timeline, index, chord, bass);
+    if (next === timeline) return; // a timeline with no segments: nothing to set
+    commitEdit(next, `Chord set to ${nameOf(next.segments[index], next)}`);
+  }
+
+  // The bass the Bass select reads for a chord on `root`: Root follows the chord's root, so a
+  // root or quality change carries it along; None is no bass; a note stays as it is.
+  function pickedBass(root) {
+    const value = $("edit-bass").value;
+    if (value === "root") return root;
+    return value === "none" ? null : value;
+  }
+
+  // A pick applies at once, to the chord the picker shows (see `pinned`). Over silence the picker
+  // reads a root, No chord and Root, so a root or bass picked there also makes the chord major:
+  // entering a chord into silence is one pick.
+  function applyPicker(event) {
+    const quality = $("edit-quality");
+    if (event.currentTarget !== quality && quality.value === "N") quality.value = "maj";
+    const root = $("edit-root").value;
+    const chord = quality.value === "N" ? "N" : `${root}:${quality.value}`;
+    setChord(pinned ?? current, chord, pickedBass(root));
+  }
+
+  // Without the recording, a timeline made with --source-url points to where it came from. The
+  // link is set only from a string Core.isHttpUrl accepts, so a hand-edited file can't make it a
+  // javascript: link; anything else leaves the plain hint. A recording that is open needs neither.
+  function renderSource() {
+    const url = timeline.source && timeline.source.url;
+    const link = $("source-link");
+    const recording = audioUrl !== null && !standIn;
+    const shown = Core.isHttpUrl(url) && !recording;
+    if (shown) {
+      link.href = url;
+      link.textContent = url;
+    } else {
+      link.removeAttribute("href");
+      link.textContent = "";
+    }
+    $("source").hidden = !shown;
+    $("no-audio").hidden = shown || recording;
+  }
+
+  // Files are paired by the user, so a length mismatch is the one hint that they don't belong
+  // together.
+  function checkDurations() {
+    const expected = timeline && timeline.source && timeline.source.duration;
+    if (typeof expected !== "number" || !Number.isFinite(audio.duration)) return;
+    if (Math.abs(audio.duration - expected) > 1) {
+      say(
+        `The recording is ${Core.formatTime(audio.duration)} long, but the chord timeline covers ` +
+        `${Core.formatTime(expected)}. Check that the two files belong together.`,
+      );
+    }
+  }
+
+  // Files are paired by the user, so a length mismatch is the one hint that the lab and the
+  // timeline don't belong together, as checkDurations reads it for the recording.
+  function checkLab() {
+    const expected = timeline && timeline.source && timeline.source.duration;
+    if (!lab || !lab.length || typeof expected !== "number") return;
+    const covered = lab.reduce((end, segment) => Math.max(end, segment.end), 0);
+    if (Math.abs(covered - expected) > 1) {
+      say(
+        `The lab file covers ${Core.formatTime(covered)}, but the chord timeline covers ` +
+        `${Core.formatTime(expected)}. Check that the two files belong together.`,
+      );
+    }
+  }
+
+  // The select's first option names the estimate the numerals are read in: the whole song's to
+  // begin with, the playhead's region once renderNow runs. A given key is one region already, so
+  // it keeps the whole song's estimate, the ranking the chords suggest.
+  function setEstimate(key) {
+    const text = `Estimated (${key ? Core.keyName(key) : "no chords"})`;
+    const option = $("key-select").options[0];
+    if (option.textContent !== text) option.textContent = text;
+  }
+
+  // The key, given (by --key or the select) or estimated. `candidates` is the estimator's ranking
+  // either way, so its first is what choosing Estimated gives; it is empty with no chord.
+  function renderKey() {
+    const key = timeline.global_key;
+    const candidates = key ? key.candidates : [];
+    const given = key?.source === "given";
+    // The whole-song key. renderNow replaces it with the playhead's region, but never runs for a
+    // timeline with no segments.
+    $("key-name").textContent = key ? Core.keyName(key.label) : "None";
+    const select = $("key-select");
+    setEstimate(candidates.length ? candidates[0] : null);
+    select.value = given ? key.label : "";
+    // Given, the candidates' heading says so; the line above them is for the other cases.
+    $("key-source").hidden = given && candidates.length > 0;
+    const changes = timeline.key_regions.length - 1;
+    const changed = changes === 1 ? "once" : `${changes} times`;
+    const change = changes > 0 ? `; the key changes ${changed}` : "";
+    $("key-source").textContent = candidates.length
+      ? `Estimated from the chords${change}.`
+      : "The timeline has no chords.";
+    $("key-candidates-label").textContent = given
+      ? "Given; the chords suggest:"
+      : "Ranked candidates";
+    $("key-candidates-label").hidden = candidates.length === 0;
+    fillList($("key-candidates"), candidates.map(Core.keyName));
+    // Regions are listed only when the estimate found more than one; a given key has one.
+    const showRegions = !given && timeline.key_regions.length > 1;
+    $("key-regions-label").hidden = !showRegions;
+    $("key-regions").hidden = !showRegions;
+    fillList(
+      $("key-regions"),
+      showRegions
+        ? timeline.key_regions.map(
+          (region) =>
+            `${Core.formatTime(timeline.beats[region.start_beat])} ${Core.keyName(region.label)}`,
+        )
+        : [],
+    );
+  }
+
+  function fillList(list, texts) {
+    list.replaceChildren(
+      ...texts.map((text) => {
+        const item = document.createElement("li");
+        item.textContent = text;
+        return item;
+      }),
+    );
+  }
+
+  function place(element, start, end) {
+    const left = xAt(start);
+    element.style.left = `${left}px`;
+    if (end !== undefined) element.style.width = `${xAt(end) - left}px`;
+  }
+
+  function renderNumeral(element, segment) {
+    element.replaceChildren();
+    if (!segment.numeral) return;
+    const parts = Core.numeralParts(segment.numeral, segment.inversion);
+    element.append(parts.accidental + parts.roman + parts.quality);
+    if (parts.figures.length) {
+      const figures = document.createElement("span");
+      figures.className = "figures";
+      for (const figure of parts.figures) {
+        const digit = document.createElement("span");
+        digit.textContent = figure;
+        figures.append(digit);
+      }
+      element.append(figures);
+    }
+    if (parts.target) element.append(`/${parts.target}`);
+  }
+
+  // Figures read one by one ("V 6 5 of V"), not as a number, and quality markers as words
+  // ("ii half-diminished seventh 4 3"), which already say seventh, so a root-position 7 is dropped.
+  function spokenNumeral(segment) {
+    const parts = Core.numeralParts(segment.numeral, segment.inversion);
+    const words = QUALITY_WORDS[parts.suffix];
+    const figures = words ? parts.figures.filter((figure) => figure !== "7") : parts.figures;
+    const head = [parts.accidental + parts.roman, words, ...figures].filter(Boolean).join(" ");
+    return parts.target ? `${head} of ${parts.target}` : head;
+  }
+
+  function renderTimeline() {
+    const { beats, segments } = timeline;
+    // Every beat gets PX_PER_BEAT, not every second, so a one-beat chord has room for its name at
+    // any tempo, and through a tempo change too: the ruler's seconds spread or bunch instead.
+    const origin = Core.beatPosition(beats, 0);
+    xAt = (t) => PX_PER_BEAT * (Core.beatPosition(beats, t) - origin);
+    const last = segments[segments.length - 1];
+    const duration = (timeline.source && timeline.source.duration) || (last ? last.end_time : 0);
+    $("track").style.width = `${xAt(duration)}px`;
+
+    buttons = segments.map((segment, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "segment";
+      button.tabIndex = -1;
+      button.dataset.index = index;
+      button.dataset.role = segment.role || "none";
+      if (segment.edited) button.dataset.edited = "";
+      place(button, segment.start_time, segment.end_time);
+      const name = nameOf(segment);
+      const chord = document.createElement("span");
+      chord.className = "segment-chord";
+      // A slash chord too long for its cell breaks before the slash, and only there. The longest
+      // heads (D♯m7♭5, B♭maj7) also take smaller type in a one-beat cell (style.css).
+      const [head, bass] = name.split("/");
+      chord.append(head);
+      if (bass) {
+        const slash = document.createElement("span");
+        slash.textContent = `/${bass}`;
+        chord.append(document.createElement("wbr"), slash);
+      }
+      chord.classList.toggle("long", head.length > 5);
+      const numeral = document.createElement("span");
+      numeral.className = "segment-numeral";
+      renderNumeral(numeral, segment);
+      // A numeral with a quality marker (♭VIImaj7, viiø7/VII) takes smaller type in a one-beat cell;
+      // a one-character suffix (V+, vii°, V7) keeps the normal size.
+      if (segment.numeral) {
+        const parts = Core.numeralParts(segment.numeral, segment.inversion);
+        numeral.classList.toggle("long", parts.suffix.length > 1);
+      }
+      button.append(chord, numeral);
+      button.title = segment.numeral
+        ? `${name}  ${Core.numeralText(segment.numeral, segment.inversion)}`
+        : name;
+      const spoken = segment.numeral ? spokenNumeral(segment) : "";
+      const label = [
+        name,
+        spoken,
+        Core.formatTime(segment.start_time),
+        segment.edited && "edited",
+      ].filter(Boolean);
+      button.setAttribute("aria-label", label.join(", "));
+      return button;
+    });
+    $("segments").replaceChildren(...buttons);
+    tabStop = null;
+
+    const marks = beats.map((beat) => {
+      const tick = document.createElement("i");
+      place(tick, beat);
+      return tick;
+    });
+    for (let second = 0; second <= duration; second += RULER_STEP) {
+      const time = document.createElement("span");
+      time.textContent = Core.formatTime(second);
+      place(time, second);
+      marks.push(time);
+    }
+    $("ruler").replaceChildren(...marks);
+    renderLab();
+  }
+
+  // The key in force at a time of the lab's. A lab's times are seconds, as the timeline's are, so
+  // they land on its own beat grid and its own key regions.
+  function keyAtTime(t) {
+    const beat = Math.max(0, Core.beatIndexAt(timeline.beats, t));
+    return Core.keyAt(timeline.key_regions, beat) ?? timeline.global_key?.label ?? null;
+  }
+
+  // The lab file's chords, in a strip of their own under the timeline's and on the same beat grid,
+  // so the two readings of the song line up chord by chord. They keep the strip's own plain look:
+  // a colour here means a harmonic role in the timeline's chords, and the lab's have none. Its
+  // cells are read-only, apart from a click, which takes the playhead to the chord.
+  function renderLab() {
+    const open = lab !== null && lab.length > 0;
+    $("lab-strip").hidden = !open;
+    $("lab-title").hidden = !open;
+    if (!open) {
+      $("lab-segments").replaceChildren();
+      return;
+    }
+    $("lab-title").textContent = `The output of ChordFormer, provided as additional reference.`;
+    // The same width as the timeline's track, so a scroll position means the same thing in both,
+    // and this strip takes up where the timeline's stands now.
+    $("lab-track").style.width = $("track").style.width;
+    syncScroll(strip, $("lab-strip"));
+    $("lab-segments").replaceChildren(
+      ...lab.map((segment) => {
+        const read = Core.labChord(segment.label, keyAtTime(segment.start));
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "segment lab-segment";
+        button.tabIndex = -1;
+        button.dataset.role = read.chord === "N" ? "none" : "lab";
+        button.dataset.start = segment.start;
+        place(button, segment.start, segment.end);
+        const chord = document.createElement("span");
+        chord.className = "segment-chord";
+        chord.textContent = read.name;
+        chord.classList.toggle("long", read.name.length > 5);
+        button.append(chord);
+        button.title = `${read.name}  ${Core.formatTime(segment.start)}`;
+        button.setAttribute("aria-label", `${read.name}, ${Core.formatTime(segment.start)}`);
+        return button;
+      }),
+    );
+  }
+
+  function roleText(segment) {
+    if (segment.role === "secondary_dominant" && segment.target) {
+      // The role covers viiø7/x, vii°7/x and vii°/x too, which lead up to their target rather than
+      // down.
+      const quality = segment.chord.split(":")[1];
+      const leadingTone = quality === "dim7" || quality === "hdim7" || quality === "dim";
+      const key = segmentKey(segment);
+      const target = Core.targetName(segment.chord, segment.target, key, leadingTone);
+      const kind = leadingTone ? "Leading-tone chord" : "Secondary dominant";
+      return `${kind} of ${segment.target} (${target})`;
+    }
+    if (segment.role === "borrowed") {
+      const parallel = segmentKey(segment).endsWith(":maj") ? "minor" : "major";
+      return `Borrowed from the parallel ${parallel}`;
+    }
+    // Every diatonic chord has a function, and only diatonic chords do.
+    if (segment.function) return `Diatonic, ${segment.function} function`;
+    return "Chromatic";
+  }
+
+  function renderNow(segment) {
+    const isChord = segment.chord !== "N";
+    document.querySelector(".now").dataset.role = segment.role || "none";
+    const key = segmentKey(segment);
+    // Wins over renderKey's whole-song key: the big key follows the playhead's region.
+    $("key-name").textContent = key ? Core.keyName(key) : "None";
+    // The estimate follows it too, so the parenthesised key names the key the numerals on the
+    // strip are read in. A given key is one region already, and keeps the whole song's estimate.
+    if (timeline.global_key?.source !== "given") setEstimate(key);
+    $("now-chord").textContent = nameOf(segment);
+    fitBigChord();
+    renderNumeral($("now-numeral"), segment);
+    // Every row always shows, so the panel doesn't jump on chord changes.
+    $("now-role").textContent = isChord ? roleText(segment) : "No chord";
+    const bass = Core.bassName(segment.chord, key, segment.bass);
+    $("now-bass").textContent = bass ? `${bass}, ${INVERSION_TEXT[segment.inversion]}` : "None heard";
+    $("now-edited").hidden = !segment.edited;
+    $("now-alt-label").textContent = segment.edited ? "Analyzer heard" : "Also heard as";
+    renderCandidates(segment);
+    renderKeys(segment);
+    renderPicker(pinned === null ? segment : timeline.segments[pinned]);
+  }
+
+  // The picker shows the segment. Over silence it still holds a root, the key's tonic, so a
+  // quality picked there makes a chord on it.
+  function renderPicker(segment) {
+    const isChord = segment.chord !== "N";
+    const key = segmentKey(segment);
+    const [root, quality] = isChord
+      ? segment.chord.split(":")
+      : [key ? key.split(":")[0] : "C", "N"];
+    $("edit-root").value = root;
+    $("edit-quality").value = quality;
+    // The root's own note is what Root reads, so it is not offered twice. Arrowing through the
+    // notes (a pick per step on Windows and Linux) then passes it instead of snapping back to
+    // Root, and reaches every note after it and None. A root moved onto a fixed bass note makes
+    // that bass Root from then on.
+    const bass = $("edit-bass");
+    for (const option of bass.options) option.disabled = option.value === root;
+    bass.value =
+      !isChord || segment.bass === root ? "root" : segment.bass === null ? "none" : segment.bass;
+  }
+
+  // The analyzer's other readings, each a button that makes it the chord. Once the chord is the
+  // user's, everything it heard is on offer, its first reading included, bar the chord itself.
+  function renderCandidates(segment) {
+    const list = $("now-alt");
+    const key = segmentKey(segment);
+    const labels = segment.edited
+      ? segment.candidates.filter((label) => label !== segment.chord)
+      : segment.candidates.slice(1);
+    // A focused candidate keeps the focus at its place in the list, when a keyboard click or
+    // playback moving on draws the list again.
+    const focused = [...list.querySelectorAll(".candidate")].indexOf(document.activeElement);
+    list.replaceChildren(
+      ...labels.map((label) => {
+        const item = document.createElement("span");
+        const button = document.createElement("button");
+        const name = Core.alternativeName(label, segment.chord, key);
+        const sameNotes = Core.sameNotes(label, segment.chord);
+        const action = `Set chord to ${name}${sameNotes ? ", same notes" : ""}`;
+        button.type = "button";
+        button.className = "button candidate";
+        button.textContent = name;
+        button.setAttribute("aria-label", action);
+        button.title = action;
+        button.addEventListener("click", (event) => {
+          releaseFocus(event);
+          setChord(current, label, label === "N" ? null : pickedBass(label.split(":")[0]));
+        });
+        item.append(button);
+        if (sameNotes) {
+          // The button's name already says it.
+          const note = document.createElement("span");
+          note.setAttribute("aria-hidden", "true");
+          note.textContent = " (same notes)";
+          item.append(note);
+        }
+        return item;
+      }),
+    );
+    const choices = list.querySelectorAll(".candidate");
+    if (focused >= 0 && choices.length) {
+      choices[Math.min(focused, choices.length - 1)].focus({ preventScroll: true });
+    }
+  }
+
+  // The current chord's keys, drawn between the facts and the key panel: the notes the chord is
+  // written as, rather than the voice-led voicing the sound plays, so a maj7 reads as C E G B and
+  // an A/C# reads from its bass. A click on the picture sounds the chord (playKeys).
+  function renderKeys(segment) {
+    renderKeyboard($("chord-keys"), segment, "hl", "Play");
+    renderFormerKeys();
+  }
+
+  // Draw one chord's keys. pianokeys fixes a keyboard's range when it is built, so every chord gets
+  // a fresh one. `highlight` names the fill style.css paints; ChordFormer's picture uses its own
+  // shade but is otherwise the same picture.
+  function renderKeyboard(button, segment, highlight, action) {
+    // pianokeys fixes a keyboard's range when it is built, so every chord gets a fresh one.
+    button.replaceChildren();
+    button.hidden = segment.chord === "N";
+    if (button.hidden) return;
+    const notes = theoryKeys(segment);
+    const names = notes.map(keyNoteName);
+    const [lowest, highest] = keyRange(notes);
+    const keyboard = new PianoKeys.Keyboard(button, {
+      lowest: keyNoteName(lowest),
+      highest: keyNoteName(highest),
+      whiteKeyHighlightFill: highlight,
+      blackKeyHighlightFill: highlight,
+    });
+    for (const name of names) keyboard.fillKey(name);
+    const label = `${action} ${names.join(" ")}`;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  }
+
+  // The index of the lab segment sounding at `t`, or -1 before the first one. Lab segments are
+  // sorted and carry `start` in seconds.
+  function labIndexAt(t) {
+    let low = 0;
+    let high = (lab?.length ?? 0) - 1;
+    let found = -1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (lab[mid].start <= t) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return found;
+  }
+
+  function labReadingAt(t) {
+    const index = labIndexAt(t);
+    if (index < 0) return null;
+    const segment = lab[index];
+    return { index, read: Core.labChord(segment.label, keyAtTime(segment.start)) };
+  }
+
+  // ChordFormer's keys, under chordotomy's, whenever dual view is on and the lab has a chord under
+  // the playhead, whether or not it matches the timeline's. The signature changes when the lab
+  // moves to another chord, so playback doesn't rebuild the SVG on every frame.
+  function renderFormerKeys() {
+    let reading = null;
+    let signature = "";
+    if (dualView && timeline && lab?.length) {
+      reading = labReadingAt(now());
+      if (reading?.read.chord && reading.read.chord !== "N") {
+        signature = `${reading.index}:${reading.read.chord}:${reading.read.bass ?? ""}`;
+      }
+    }
+    if (signature === formerSignature) return;
+    formerSignature = signature;
+    const button = $("chord-keys-former");
+    if (!signature) {
+      button.hidden = true;
+      button.replaceChildren();
+      return;
+    }
+    renderKeyboard(button, reading.read, "former", "ChordFormer: play");
+  }
+
+  // ChordFormer's picture sounds the notes it draws, just as chordotomy's picture sounds its own
+  // chord.
+  function playTheoryChord(segment) {
+    // pianokeys numbers middle C 48; the chord sound's MIDI numbering calls it 60.
+    const notes = theoryKeys(segment).map((note) => note + 12);
+    if (!notes.length) return;
+    ensureContext();
+    if (audition) fadeOut(audition);
+    audition = new GainNode(context);
+    audition.connect(chordBus);
+    const start = context.currentTime;
+    strikeChord({ bass: notes[0], notes: notes.slice(1) }, start, start + 1.5, audition);
+  }
+
+  function keyRange(notes) {
+    const lowest = notes[0];
+    const highest = notes[notes.length - 1];
+    // The fixed C3-C5 frame holds every chord that fits in it; it is itself the context around the
+    // chord, so no white key of context is added while it holds. Only a chord that does not fit —
+    // one wider than the frame, or one whose notes have no octave inside it (nearMiddleC then places
+    // it as near C4 as it can) — moves the edges: the left edge becomes the white key left of the
+    // chord's lowest note, the right edge the white key right of its highest, as a keyboard always
+    // starts and ends on a white key. The fixed frame stays a floor, so a moved frame is never
+    // narrower than it.
+    if (lowest >= KEY_FIXED_LOW && highest <= KEY_FIXED_HIGH) return [KEY_FIXED_LOW, KEY_FIXED_HIGH];
+    return [
+      Math.min(KEY_FIXED_LOW, whiteKeyBelow(lowest)),
+      Math.max(KEY_FIXED_HIGH, whiteKeyAbove(highest)),
+    ];
+  }
+
+  // The chord's own notes in close position, the lowest of them being the bass where the name
+  // carries one and the root otherwise, and the rest stacked above it in the chord's own order: the
+  // chord as it is written, not the smooth voicing the sound plays. Ascending, so the ninth of a
+  // maj(9) lands above the octave, as it should. A bass that is not a chord tone has no place in
+  // that stack, so it sits an octave below the root's instead. A chord that marks no inversion is
+  // drawn in root position, its extensions and all: only a marked bass moves where the stack starts.
+  // The finished stack is moved by octaves to sit around middle C (nearMiddleC).
+  function theoryKeys(segment) {
+    const pcs = Core.pitchClasses(segment.chord);
+    const bass = segment.bass === null ? -1 : Harmony.ROOTS.indexOf(segment.bass);
+    // Which of the chord's tones the stack starts on: the bass's own, or the root.
+    const start = Math.max(pcs.indexOf(bass), 0);
+    const notes = [KEYS_C + pcs[start]];
+    for (let k = 1; k < pcs.length; k++) {
+      const pc = pcs[(start + k) % pcs.length];
+      notes.push(notes[k - 1] + ((pc - notes[k - 1]) % 12 + 12) % 12);
+    }
+    if (bass >= 0 && !pcs.includes(bass)) {
+      let note = notes[0] - 1;
+      while (note % 12 !== bass) note -= 1;
+      notes.unshift(note);
+    }
+    return nearMiddleC(notes);
+  }
+
+  // `notes` moved by whole octaves so the chord sits as near middle C as its pitch classes allow. A
+  // placement the fixed C3-C5 frame holds beats one it does not, so a chord the frame can hold is
+  // never drawn outside it; among placements that fit equally well the one whose centre — the
+  // midpoint of its lowest and highest keys — lands nearest C4 wins, and ties go to the lower
+  // placement. Every note moves together, so the chord's inversion never changes.
+  function nearMiddleC(notes) {
+    const centre = (notes[0] + notes[notes.length - 1]) / 2;
+    let best = null;
+    for (let octave = -6; octave <= 6; octave++) {
+      const shift = octave * 12;
+      const low = notes[0] + shift;
+      const high = notes[notes.length - 1] + shift;
+      const fits = low >= KEY_FIXED_LOW && high <= KEY_FIXED_HIGH;
+      const off = Math.abs(centre + shift - KEYS_C);
+      const better =
+        best === null ||
+        (fits !== best.fits && fits) ||
+        (fits === best.fits && (off < best.off || (off === best.off && shift < best.shift)));
+      if (better) best = { shift, fits, off };
+    }
+    return notes.map((note) => note + best.shift);
+  }
+
+  // A long name (D♯m7♭5/C♯) is wider than the chord column at full size; it shrinks to fit rather
+  // than lose its bass. Text width is proportional to the font size, so one measurement sets it.
+  // The line keeps its height, so the rows below don't move when such a name comes up.
+  function fitBigChord() {
+    const element = $("now-chord");
+    element.style.fontSize = "";
+    element.style.lineHeight = "";
+    const overflow = element.scrollWidth / element.clientWidth;
+    if (!(overflow > 1)) return;
+    const size = parseFloat(getComputedStyle(element).fontSize);
+    element.style.lineHeight = `${size}px`;
+    element.style.fontSize = `${Math.floor(size / overflow)}px`;
+  }
+
+  function show(index) {
+    if (current !== null && buttons[current]) buttons[current].classList.remove("current");
+    current = index;
+    const button = buttons[index];
+    if (!button) return;
+    button.classList.add("current");
+    // One tab stop for the whole timeline, on the current chord.
+    if (tabStop) tabStop.tabIndex = -1;
+    button.tabIndex = 0;
+    tabStop = button;
+    renderNow(timeline.segments[index]);
+  }
+
+  function now() {
+    return audio.currentTime;
+  }
+
+  function currentIndex(t = now()) {
+    // The head before the first beat is shorter than a beat, so it shows the first chord rather
+    // than nothing.
+    return Math.max(0, Core.segmentIndexAt(timeline.segments, t));
+  }
+
+  function update() {
+    if (!timeline) return;
+    const x = xAt(now());
+    $("playhead").style.transform = `translateX(${x}px)`;
+    $("lab-playhead").style.transform = `translateX(${x}px)`;
+    const index = currentIndex();
+    if (index !== current) show(index);
+    renderFormerKeys();
+    follow(x);
+    refreshEditor();
+  }
+
+  // What the edit buttons can do from here. Split depends on the beat under the playhead, not just
+  // the chord, so this runs on every update, not only when the chord changes.
+  function refreshEditor() {
+    const { segments } = timeline;
+    const segment = segments[current];
+    const splittable = splitPoint() !== null;
+    let splitTitle = "Split this chord at the beat under the playhead";
+    if (!splittable && segment && segment.end_beat - segment.start_beat === 1) {
+      splitTitle = "This chord is one beat long; there is nowhere inside it to split";
+    } else if (!splittable) {
+      splitTitle = "Step to a beat inside this chord to split it there (Shift+← or Shift+→)";
+    }
+    setButton("split", splittable, splitTitle);
+    setButton("merge-before", segments[current - 1] !== undefined);
+    setButton("merge-after", segments[current + 1] !== undefined);
+    const lone = segments.length < 2;
+    setButton(
+      "delete",
+      !lone,
+      lone
+        ? "The only chord can't be deleted; set it to No chord instead"
+        : `Delete this chord; the chord ${current === 0 ? "after" : "before"} takes its beats`,
+    );
+    setButton("undo", history.past.length > 0);
+    setButton("redo", history.future.length > 0);
+    // Save takes its unsaved look from this text being shown (style.css).
+    const unsaved = dirty();
+    if ($("unsaved").hidden === unsaved) $("unsaved").hidden = !unsaved;
+  }
+
+  // aria-disabled rather than disabled, so a button stays focusable: a keyboard click that rules
+  // out its own next use (Split after a split, Undo at the oldest step) keeps the focus there,
+  // and the title saying why can still be reached. Each action does nothing where it doesn't
+  // apply. This runs every frame, so only a change touches the DOM and the accessibility tree.
+  function setButton(id, enabled, title) {
+    const button = $(id);
+    const disabled = String(!enabled);
+    if (button.getAttribute("aria-disabled") !== disabled) {
+      button.setAttribute("aria-disabled", disabled);
+    }
+    if (title !== undefined && button.title !== title) button.title = title;
+  }
+
+  // Turn the page when the playhead leaves the view, instead of scrolling every frame: the chords
+  // ahead stay still long enough to read.
+  function follow(x) {
+    const width = strip.clientWidth;
+    const left = performance.now() < turnUntil ? turnTarget : strip.scrollLeft;
+    if (x >= left && x <= left + width * 0.85) return;
+    turnTarget = Math.max(0, x - width * 0.10);
+    turnUntil = performance.now() + 600;
+    // A long seek jumps: smooth-scrolling through minutes of chords is only a blur.
+    const jump = reducedMotion.matches || Math.abs(turnTarget - strip.scrollLeft) > width;
+    strip.scrollTo({ left: turnTarget, behavior: jump ? "auto" : "smooth" });
+  }
+
+  function frame() {
+    update();
+    looping = !audio.paused;
+    if (looping) requestAnimationFrame(frame);
+  }
+
+  function seekTime(t) {
+    audio.currentTime = t + SEEK_NUDGE;
+    update();
+  }
+
+  function seek(index) {
+    const segment = timeline.segments[index];
+    if (!segment) return;
+    seekTime(segment.start_time);
+    auditionChord(index);
+  }
+
+  // Shift+← and Shift+→: to the beat before or after the one under the playhead, so a split point
+  // can be reached without a mouse, and with no recording open.
+  function stepBeat(step) {
+    const { beats } = timeline;
+    const beat = Core.beatIndexAt(beats, now()) + step;
+    if (beat >= 0 && beat < beats.length) seekTime(beats[beat]);
+  }
+
+  function togglePlay() {
+    if (!audioUrl) return;
+    if (audio.paused) {
+      const what = standIn ? "the chords" : "the recording";
+      audio.play().catch((error) => say(`Couldn't play ${what}: ${error.message}`));
+    } else {
+      audio.pause();
+    }
+  }
+
+  // Squared, so the slider sounds even. Measured on a mastered track, the default (80) sits about
+  // 9 dB under the recording; at the top, a seventh chord with every wave in phase stays short of
+  // clipping.
+  function chordGain() {
+    return (Number($("chord-volume").value) / 100) ** 2;
+  }
+
+  // Created or resumed in a user gesture, the toggle or any press while the chords are on (the
+  // listeners after the toggle's), so the autoplay policy lets the context run.
+  function ensureContext() {
+    if (!context) {
+      context = new AudioContext();
+      chordBus = new GainNode(context, { gain: chordGain() });
+      // Takes the edge off the triangle waves, so the chords sit under the recording.
+      const lowpass = new BiquadFilterNode(context, { type: "lowpass", frequency: 1800 });
+      chordBus.connect(lowpass).connect(context.destination);
+    }
+    if (context.state === "suspended") {
+      context.resume().catch((error) => say(`Couldn't start the chord sound: ${error.message}`));
+    }
+  }
+
+  // The recording's clock is moving: not paused, not mid-seek, not stalled waiting for data.
+  function clockRunning() {
+    return !audio.paused && !audio.seeking && audio.readyState >= audio.HAVE_FUTURE_DATA;
+  }
+
+  function startChords() {
+    if (ticker || !playChords || !timeline || !audioUrl || !clockRunning()) return;
+    ensureContext();
+    if (audition) fadeOut(audition);
+    audition = null;
+    session = new GainNode(context);
+    session.connect(chordBus);
+    // Mid-beat, the chord sounding now starts at once rather than waiting for the next beat.
+    nextStrike = Core.strikeIndexAt(chordStrikes, audio.currentTime);
+    ticker = setInterval(scheduleChords, TICK_MS);
+    scheduleChords();
+  }
+
+  // On pause, seek, stall, rate change or the toggle: fade out everything sounding or queued. The
+  // next start finds its place afresh, so a long seek can't release a burst of stale notes.
+  function stopChords() {
+    clearInterval(ticker);
+    ticker = null;
+    if (session) fadeOut(session);
+    session = null;
+  }
+
+  // Fade rather than cut, so stopping never clicks; unhook once the fade is long over.
+  function fadeOut(node) {
+    node.gain.setTargetAtTime(0, context.currentTime, 0.01);
+    setTimeout(() => node.disconnect(), 1000);
+  }
+
+  // Paused, a chord you click or step to sounds once, so it can be checked on its own. This has
+  // its own gain, since the seek's own events stop the playback session right after.
+  function auditionChord(index) {
+    const voicing = chordVoicings[index];
+    if (!playChords || !voicing || !audioUrl || !audio.paused) return;
+    ensureContext();
+    if (audition) fadeOut(audition);
+    audition = new GainNode(context);
+    audition.connect(chordBus);
+    const segment = timeline.segments[index];
+    const now = context.currentTime;
+    strikeChord(voicing, now, now + Math.min(segment.end_time - segment.start_time, 1.5), audition);
+  }
+
+  // A click on the chord's keys sounds it once, as turning Play chords on does, whatever the toggle
+  // says and whether or not the recording is playing: the picture is there to be checked by ear on
+  // its own. It takes the audition's gain, so the next click or edit fades this one out.
+  function playKeys(index) {
+    const voicing = chordVoicings[index];
+    if (!voicing || !timeline) return;
+    const segment = timeline.segments[index];
+    if (!segment) return;
+    ensureContext();
+    if (audition) fadeOut(audition);
+    audition = new GainNode(context);
+    audition.connect(chordBus);
+    const start = context.currentTime;
+    strikeChord(voicing, start, start + Math.min(segment.end_time - segment.start_time, 1.5), audition);
+  }
+
+  function scheduleChords() {
+    // pause() and seeks stop the clock at once but send their events later: skip that gap.
+    if (context.state !== "running" || !clockRunning()) return;
+    const now = context.currentTime;
+    const { due, next } = Core.dueStrikes(chordStrikes, nextStrike, {
+      media: audio.currentTime,
+      rate: audio.playbackRate,
+      lookahead: LOOKAHEAD,
+      // A note scheduled now is heard this much later, while the recording's currentTime already
+      // allows for its own output delay. outputLatency is missing in some browsers.
+      lag: (context.baseLatency || 0) + (context.outputLatency || 0),
+    });
+    nextStrike = next;
+    for (const strike of due) {
+      strikeChord(chordVoicings[strike.segment], now + strike.start, now + strike.end, session);
+    }
+  }
+
+  // A soft, clearly pitched voice per note: a triangle and a slightly detuned sine, a quick attack,
+  // a decay toward a lower sustain, and a fade just before the next beat so each strike is heard.
+  function strikeChord(voicing, start, end, destination) {
+    const release = Math.max(start + ATTACK, end - 0.05);
+    const notes = [[voicing.bass, 0.1], ...voicing.notes.map((note) => [note, 0.07])];
+    for (const [note, level] of notes) {
+      const envelope = new GainNode(context, { gain: 0 });
+      envelope.gain.setValueAtTime(0, start);
+      envelope.gain.linearRampToValueAtTime(level, start + ATTACK);
+      envelope.gain.setTargetAtTime(level * 0.4, start + ATTACK, 0.3);
+      envelope.gain.setTargetAtTime(0, release, RELEASE);
+      envelope.connect(destination);
+      const frequency = 440 * 2 ** ((note - 69) / 12);
+      const oscillators = [
+        ["triangle", -4],
+        ["sine", 4],
+      ].map(([type, detune]) => {
+        const oscillator = new OscillatorNode(context, { type, frequency, detune });
+        oscillator.connect(envelope);
+        oscillator.start(start);
+        oscillator.stop(release + RELEASE * 8);
+        return oscillator;
+      });
+      // Both stop together; unhooking the envelope then keeps a long song from piling up nodes.
+      oscillators[0].onended = () => envelope.disconnect();
+    }
+  }
+
+  function setPlayChords(on) {
+    playChords = on;
+    $("play-chords").setAttribute("aria-pressed", String(on));
+    if (on) {
+      ensureContext();
+      startChords();
+      // Paused, turning it on sounds the current chord, so it's never on and silent.
+      if (timeline) auditionChord(currentIndex());
+    } else {
+      stopChords();
+      if (audition) fadeOut(audition);
+      audition = null;
+      // Idle, the context would keep the audio device busy. Suspend once the fade is done.
+      setTimeout(() => {
+        if (!playChords && context) context.suspend();
+      }, 200);
+    }
+  }
+
+  // After a mouse click, focus leaves the button, so Space goes back to playing and pausing.
+  // A keyboard click (detail 0) keeps it there.
+  function releaseFocus(event) {
+    if (event.detail > 0) event.currentTarget.blur();
+  }
+
+  function toggleMute() {
+    audio.muted = !audio.muted;
+  }
+
+  function setDualView(on) {
+    dualView = on;
+    $("dual-view").setAttribute("aria-pressed", String(on));
+    document.querySelector(".now").dataset.dual = String(on);
+    formerSignature = null;
+    renderFormerKeys();
+  }
+
+  // The theme starts on auto and follows the OS. A click sets the opposite of what is showing, and
+  // the choice lasts only for this page view.
+  function currentTheme() {
+    return themeChoice ?? (darkTheme.matches ? "dark" : "light");
+  }
+
+  function renderThemeButton() {
+    const button = $("theme-toggle");
+    const theme = currentTheme();
+    const next = theme === "dark" ? "light" : "dark";
+    button.textContent = themeChoice ? `Theme: ${theme === "dark" ? "Dark" : "Light"}` : "Theme: Auto";
+    button.title = `Theme: ${themeChoice ? theme : `auto (${theme})`}. Switch to ${next}`;
+    button.setAttribute("aria-label", button.title);
+  }
+
+  function applyTheme() {
+    if (themeChoice) document.documentElement.dataset.theme = themeChoice;
+    else delete document.documentElement.dataset.theme;
+    renderThemeButton();
+  }
+
+  $("dual-view").addEventListener("click", (event) => {
+    releaseFocus(event);
+    setDualView(!dualView);
+  });
+  $("theme-toggle").addEventListener("click", (event) => {
+    releaseFocus(event);
+    themeChoice = currentTheme() === "dark" ? "light" : "dark";
+    applyTheme();
+  });
+  darkTheme.addEventListener("change", () => {
+    if (!themeChoice) renderThemeButton();
+  });
+  applyTheme();
+
+  for (const button of document.querySelectorAll(".open-files")) {
+    button.addEventListener("click", (event) => {
+      releaseFocus(event);
+      picker.click();
+    });
+  }
+  $("dismiss").addEventListener("click", clearMessages);
+  // The column narrows with the window, and the accidentals' font can arrive after the first fit.
+  addEventListener("resize", fitBigChord);
+  document.fonts.addEventListener("loadingdone", fitBigChord);
+  picker.addEventListener("change", () => {
+    takeFiles(picker.files);
+    picker.value = ""; // so choosing the same file again still fires change
+  });
+
+  $("segments").addEventListener("click", (event) => {
+    const button = event.target.closest(".segment");
+    if (button) seek(Number(button.dataset.index));
+  });
+
+  // The two strips are one timeline in two rows: scrolling either takes the other along, so the
+  // lab's chord stays under the playhead line. The strip written to reports the move in a scroll
+  // event of its own, and that echo must not pass for a scroll of its own: answering it would
+  // write a stale position back and pull the strip it was following, cancelling a smooth turn
+  // (see follow). So a write leaves the value it wrote, and the one event that matches it is
+  // dropped.
+  const labStrip = $("lab-strip");
+  const echoed = new Map();
+  function syncScroll(from, to) {
+    echoed.set(to, from.scrollLeft);
+    to.scrollLeft = from.scrollLeft;
+  }
+  function followScroll(from, to) {
+    return () => {
+      const written = echoed.get(from);
+      echoed.delete(from);
+      if (written !== from.scrollLeft) syncScroll(from, to);
+    };
+  }
+  strip.addEventListener("scroll", followScroll(strip, labStrip));
+  labStrip.addEventListener("scroll", followScroll(labStrip, strip));
+
+  // A lab chord isn't a chord of the timeline: clicking one only takes the playhead to it.
+  $("lab-segments").addEventListener("click", (event) => {
+    const button = event.target.closest(".segment");
+    if (button) seekTime(Number(button.dataset.start));
+  });
+
+  // A pick takes a moment (a menu is open, or the arrows step through it), and playback may move
+  // on meanwhile: the picker stays on the chord it showed when the press or the focus began, and
+  // lets go when the select loses focus. Picked with the mouse, a select lets go of focus as the
+  // buttons do, so Space goes back to playing and pausing; picked from the keyboard, it keeps it.
+  let pointerPick = false;
+  const pin = () => {
+    if (pinned === null) pinned = current;
+  };
+  for (const id of ["edit-root", "edit-quality", "edit-bass"]) {
+    const select = $(id);
+    select.addEventListener("pointerdown", () => {
+      pointerPick = true;
+      pin();
+    });
+    select.addEventListener("focus", pin);
+    select.addEventListener("blur", () => {
+      pinned = null;
+      show(current);
+    });
+    // A touch that scrolls the page from the select pins it but never focuses it, so no blur
+    // lets go.
+    select.addEventListener("pointercancel", () => {
+      if (document.activeElement === select) return;
+      pinned = null;
+      show(current);
+    });
+    select.addEventListener("keydown", () => (pointerPick = false));
+    select.addEventListener("change", (event) => {
+      applyPicker(event);
+      if (pointerPick) select.blur();
+    });
+  }
+
+  // The key select lists the 24 keys after Estimated, in the analyzer's order, named as the page
+  // names keys. It lets go of focus after a mouse pick as the picker's selects do.
+  const keySelect = $("key-select");
+  keySelect.append(...Harmony.KEYS.map((label) => new Option(Core.keyName(label), label)));
+  keySelect.addEventListener("pointerdown", () => (pointerPick = true));
+  keySelect.addEventListener("keydown", () => (pointerPick = false));
+  keySelect.addEventListener("change", () => {
+    setKey(keySelect.value);
+    if (pointerPick) keySelect.blur();
+  });
+
+  // An edit button acts on the moment its press began: during playback the click comes a moment
+  // later, maybe on the next beat or chord. A click with no press of its own (from assistive
+  // technology) acts on the moment of the click.
+  let pressedAt = null;
+  const actions = {
+    split: splitAt,
+    "merge-before": (t) => mergeWith(currentIndex(t), -1),
+    "merge-after": (t) => mergeWith(currentIndex(t), 1),
+    delete: (t) => deleteAt(currentIndex(t)),
+    undo: () => stepHistory(Edit.undo, "Undo"),
+    redo: () => stepHistory(Edit.redo, "Redo"),
+  };
+  for (const [id, action] of Object.entries(actions)) {
+    const button = $(id);
+    const press = () => (pressedAt = now());
+    button.addEventListener("pointerdown", press);
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") press();
+    });
+    button.addEventListener("click", (event) => {
+      const t = pressedAt ?? now();
+      pressedAt = null;
+      releaseFocus(event);
+      action(t);
+    });
+  }
+  // A press that ends without a click on its button (released off it, or a touch that turned
+  // into a scroll) ends here, after any button's own click handler has run.
+  document.addEventListener("click", () => (pressedAt = null));
+  document.addEventListener("pointercancel", () => (pressedAt = null));
+
+  // Saving is allowed with nothing unsaved too: it writes an opened schema-4 to 10 file as an 11.
+  $("save").addEventListener("click", (event) => {
+    releaseFocus(event);
+    save();
+  });
+  // Closing or reloading the page would lose the unsaved edits, so the browser asks first.
+  addEventListener("beforeunload", (event) => {
+    if (!dirty()) return;
+    event.preventDefault();
+    event.returnValue = true; // what Chrome before 119 asks on instead of preventDefault
+  });
+
+  $("play-chords").addEventListener("click", (event) => {
+    releaseFocus(event);
+    setPlayChords(!playChords);
+  });
+  // The keyboard is redrawn for every chord, so its one listener reads the chord current then.
+  $("chord-keys").addEventListener("click", (event) => {
+    releaseFocus(event);
+    playKeys(current);
+  });
+  $("chord-keys-former").addEventListener("click", (event) => {
+    releaseFocus(event);
+    const reading = labReadingAt(now());
+    if (reading?.read.chord && reading.read.chord !== "N") playTheoryChord(reading.read);
+  });
+  // A stand-in turns the chords on without the toggle, and Safari starts an AudioContext only in
+  // a user gesture, not in the playing event that comes after one. So any press while the chords
+  // are on gets the context ready before playback asks for it. pointerup too: on iOS a tap's
+  // pointerdown comes from touchstart, which WebKit doesn't count as a gesture.
+  for (const type of ["pointerdown", "pointerup", "keydown"]) {
+    addEventListener(
+      type,
+      () => {
+        if (playChords) ensureContext();
+      },
+      true,
+    );
+  }
+  $("mute-recording").addEventListener("click", (event) => {
+    releaseFocus(event);
+    toggleMute();
+  });
+  $("chord-volume").addEventListener("input", () => {
+    if (chordBus) chordBus.gain.setTargetAtTime(chordGain(), context.currentTime, 0.02);
+  });
+  // Dragged with the mouse, the slider lets go of focus too; from the keyboard it keeps it.
+  $("chord-volume").addEventListener("pointerup", (event) => event.currentTarget.blur());
+  // The native controls can mute too, so the button follows the element rather than a flag.
+  audio.addEventListener("volumechange", () => {
+    $("mute-recording").setAttribute("aria-pressed", String(audio.muted));
+  });
+
+  // The chords follow the recording's clock: they start when it runs and stop whenever it stops
+  // or jumps. A seek is seeking (stop) then seeked (start from the new place).
+  audio.addEventListener("playing", startChords);
+  audio.addEventListener("seeked", startChords);
+  for (const type of ["pause", "seeking", "waiting", "ended", "emptied"]) {
+    audio.addEventListener(type, stopChords);
+  }
+  audio.addEventListener("ratechange", () => {
+    stopChords();
+    startChords();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (!timeline || event.altKey) return;
+    const target = event.target;
+    // A select (or a text field) keeps every key: letters pick by name, Space opens it, arrows
+    // step through it, and an undo there would pull the chord it picks for out from under it.
+    // A select has no use for Backspace, but a WebKit that still goes back a page on it would
+    // leave the edits behind, and a keyboard pick keeps the focus on the select.
+    if (target.closest("select")) {
+      if (event.key === "Backspace") event.preventDefault();
+      return;
+    }
+    if (target.closest("input[type=text]")) return;
+    // Letter shortcuts work from every other control; none of them takes letters. The physical
+    // key is the fallback, so they also work with a non-Latin layout on (Korean input sends "ㅊ"
+    // for C).
+    const letter = /^[a-z]$/i.test(event.key)
+      ? event.key.toLowerCase()
+      : { KeyC: "c", KeyM: "m", KeyS: "s", KeyY: "y", KeyZ: "z" }[event.code];
+    if (event.ctrlKey || event.metaKey) {
+      // Ctrl+Z or ⌘Z undoes and adds Shift to redo; Ctrl+Y redoes too, as on Windows (⌘Y is the
+      // browser's history on a Mac). Every other combination is the browser's.
+      const redo = (letter === "z" && event.shiftKey) || (letter === "y" && !event.metaKey);
+      if (letter !== "z" && !redo) return;
+      event.preventDefault();
+      // Held down, an edit key acts once, as C and M do: a held Delete would take several chords.
+      if (event.repeat) return;
+      if (redo) stepHistory(Edit.redo, "Redo");
+      else stepHistory(Edit.undo, "Undo");
+      return;
+    }
+    if (letter === "s") {
+      event.preventDefault();
+      if (!event.repeat) splitAt(now());
+      return;
+    }
+    // Backspace too, as a Mac keyboard has no Delete key; preventDefault keeps it from going back
+    // a page in browsers that still do that.
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      if (!event.repeat) deleteAt(current);
+      return;
+    }
+    if ((letter === "c" && audioUrl) || (letter === "m" && audioUrl && !standIn)) {
+      event.preventDefault();
+      if (event.repeat) return;
+      // The button that changed doesn't have focus, so say what happened for screen readers.
+      if (letter === "c") {
+        setPlayChords(!playChords);
+        $("announce").textContent = playChords ? "Chords on" : "Chords off";
+      } else {
+        toggleMute();
+        $("announce").textContent = audio.muted ? "Recording muted" : "Recording on";
+      }
+      return;
+    }
+    if (event.key === " ") {
+      // Buttons and links keep Space (on a chord button it plays rather than seeks). The audio
+      // element toggles on Space by itself, as preventDefault doesn't stop it.
+      if (target === audio || target.closest("button:not(.segment), a")) return;
+      event.preventDefault();
+      togglePlay();
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      // The volume slider's and the player's own arrows (on the player, both would seek).
+      if (target === audio || target.closest("input")) return;
+      event.preventDefault();
+      const step = event.key === "ArrowRight" ? 1 : -1;
+      if (event.shiftKey) {
+        stepBeat(step);
+      } else {
+        const index = Core.stepIndex(timeline.segments, now(), step);
+        if (index < 0) return;
+        seek(index);
+      }
+      if (strip.contains(document.activeElement) && buttons[current]) {
+        buttons[current].focus({ preventScroll: true });
+      }
+    }
+  });
+
+  audio.addEventListener("play", () => {
+    if (!looping) {
+      looping = true;
+      requestAnimationFrame(frame);
+    }
+  });
+  for (const type of ["seeking", "seeked", "pause", "ended"]) audio.addEventListener(type, update);
+  audio.addEventListener("loadedmetadata", () => {
+    update();
+    checkDurations();
+  });
+  audio.addEventListener("error", () => {
+    say(
+      standIn
+        ? "This browser can't play the chords without the recording. Open the recording too."
+        : `This browser can't play ${$("audio-name").textContent}.`,
+    );
+  });
+
+  // Drops anywhere on the page. The counter is there because dragleave also fires when the
+  // pointer moves between child elements.
+  const dropzone = $("dropzone");
+  let dragDepth = 0;
+  const carriesFiles = (event) => event.dataTransfer && event.dataTransfer.types.includes("Files");
+  addEventListener("dragenter", (event) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    dropzone.hidden = false;
+  });
+  addEventListener("dragover", (event) => {
+    if (carriesFiles(event)) event.preventDefault();
+  });
+  addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropzone.hidden = true;
+  });
+  addEventListener("drop", (event) => {
+    event.preventDefault();
+    dragDepth = 0;
+    dropzone.hidden = true;
+    if (event.dataTransfer) takeFiles(event.dataTransfer.files);
+  });
+})();
