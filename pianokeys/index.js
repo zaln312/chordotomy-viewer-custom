@@ -31,9 +31,6 @@ function parseNoteName(noteName) {
             super('Invalid note name: ' + noteName);
             this.name = 'NoteNameParseError';
             this.noteName = noteName;
-            this.onKeyClickedCallback = null;
-            this.onKeyMouseUpCallback = null;
-            this.onKeyMouseDownCallback = null;
         }
     }
 
