@@ -39,7 +39,11 @@
     <script src="harmony.js" defer></script>
     <script src="core.js" defer></script>
     <script src="edit.js" defer></script>
+    <script src="button-icons.js" defer></script>
     <script src="pianokeys/index.js" defer></script>
+    <script src="guitarchords/db.js" defer></script>
+    <script src="guitarchords/vexchords.js" defer></script>
+    <script src="guitarchords/index.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -60,18 +64,44 @@
         </div>
       </dl>
       <p class="privacy">Files stay in this browser. Nothing is uploaded.</p>
-      <a class="repo" href="https://github.com/zeikar/chordotomy">GitHub</a>
-      <button type="button" class="button open-files">Open files</button>
-      <button
-        type="button"
-        class="button toggle"
-        id="dual-view"
-        aria-pressed="false"
-        title="Show ChordFormer's keys under chordotomy's"
-      >
-        Dual view
-      </button>
-      <button type="button" class="button theme-toggle" id="theme-toggle">Theme: Auto</button>
+      <div class="controls">
+        <button type="button" class="button open-files">Open files</button>
+        <div class="view-switch" id="view-switch" data-dual="false">
+          <button
+            type="button"
+            class="button toggle"
+            id="dual-view"
+            aria-pressed="false"
+            aria-label="Toggle dual view"
+          >
+            <span id="dual-view-label">Single view</span>
+          </button>
+          <div class="view-switch-popover">
+            <button type="button" class="button" data-deduplicate="true" aria-pressed="false">
+              Deduplicate
+            </button>
+            <button type="button" class="button" data-deduplicate="false" aria-pressed="true">
+              Show all
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="button instrument-toggle"
+          id="guitar-view"
+          aria-pressed="false"
+          aria-label="Instrument: Piano. Switch to Guitar"
+        >
+        </button>
+        <button
+          type="button"
+          class="button theme-toggle"
+          id="theme-toggle"
+          data-choice="auto"
+          aria-label="Theme: Auto. Switch to Light"
+        >
+        </button>
+      </div>
       <input
         id="picker"
         type="file"

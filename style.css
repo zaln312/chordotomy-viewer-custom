@@ -228,11 +228,113 @@ kbd {
   flex: none;
 }
 
-.repo {
+/* The top-bar controls use the editor row's spacing. */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   flex: none;
+}
+
+/* The dual-view switch follows the reference's logic: the main button turns the second reading
+   on and off, and only while it is on do its deduplication choices show. */
+.view-switch {
+  position: relative;
+  flex: none;
+}
+
+.view-switch-popover {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: fit-content;
+  z-index: 5;
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms;
+}
+
+.view-switch[data-dual="true"]:hover .view-switch-popover,
+.view-switch[data-dual="true"].popover-open .view-switch-popover,
+.view-switch[data-dual="true"]:focus-within .view-switch-popover {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.view-switch-popover .button {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  text-align: center;
+  white-space: nowrap;
   font-size: 13px;
-  color: var(--pencil);
-  text-underline-offset: 2px;
+  border-color: var(--rule);
+}
+
+.view-switch-popover .button[aria-pressed="true"] {
+  color: var(--paper);
+  background: var(--ink);
+  border-color: var(--ink);
+}
+
+/* The dual-view button is styled like the plain bar buttons: its label says the state, so it
+   does not need the dot and underline that ordinary toggles use. */
+#dual-view::before {
+  display: none;
+}
+
+#dual-view[aria-pressed="true"] {
+  background: transparent;
+  box-shadow: none;
+}
+
+#dual-view[aria-pressed="true"]:hover {
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+}
+
+.theme-icon {
+  display: none;
+}
+
+.theme-toggle[data-choice="auto"] .theme-icon[data-choice="auto"],
+.theme-toggle[data-choice="light"] .theme-icon[data-choice="light"],
+.theme-toggle[data-choice="dark"] .theme-icon[data-choice="dark"] {
+  display: block;
+}
+
+.instrument-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+}
+
+.instrument-icon {
+  display: none;
+}
+
+.instrument-toggle[data-choice="piano"] .instrument-icon[data-choice="piano"],
+.instrument-toggle[data-choice="guitar"] .instrument-icon[data-choice="guitar"] {
+  display: block;
 }
 
 .empty a,
@@ -260,7 +362,7 @@ kbd {
   margin: 0;
 }
 
-.status p + p {
+.status p+p {
   margin-top: 6px;
 }
 
@@ -338,7 +440,7 @@ body:has(#empty:not([hidden])) .status {
   font-size: 16px;
 }
 
-.steps li + li {
+.steps li+li {
   margin-top: 8px;
 }
 
@@ -468,7 +570,7 @@ body:has(#empty:not([hidden])) .status {
 }
 
 /* No numeral (N.C.): the badge starts the line. */
-.big-numeral:empty + .badge {
+.big-numeral:empty+.badge {
   margin-left: 0;
 }
 
@@ -529,7 +631,7 @@ body:has(#empty:not([hidden])) .status {
   flex-direction: column;
   justify-content: center;
   align-items: flex-start;
-  gap: 24px;
+  gap: 12px;
   min-width: 0;
 }
 
@@ -544,27 +646,30 @@ body:has(#empty:not([hidden])) .status {
 
 .chord-keys svg {
   display: block;
-  width: auto;
-  height: 138px;
   max-width: 100%;
   min-width: 0;
 }
 
 /* pianokeys paints each key's fill as an attribute; the page's own inks win over it. A key of the
-   current chord is green, whatever the chord's role. */
-.chord-keys svg rect {
+   current chord is green, whatever the chord's role. Guitar shapes keep VexChords' own styling. */
+.chord-keys[data-instrument="piano"] svg {
+  width: auto;
+  height: 154px;
+}
+
+.chord-keys[data-instrument="piano"] svg rect {
   stroke: var(--rule);
 }
 
-.chord-keys svg rect[fill="white"] {
+.chord-keys[data-instrument="piano"] svg rect[fill="white"] {
   fill: var(--sheet);
 }
 
-.chord-keys svg rect[fill="black"] {
+.chord-keys[data-instrument="piano"] svg rect[fill="black"] {
   fill: var(--ink);
 }
 
-.chord-keys svg rect[fill="hl"] {
+.chord-keys[data-instrument="piano"] svg rect[fill="hl"] {
   fill: var(--press);
 }
 
@@ -578,8 +683,10 @@ body:has(#empty:not([hidden])) .status {
    where they were. */
 .now[data-dual="true"] .chord-keys-stack {
   display: grid;
-  grid-template-rows: 138px 138px;
-  gap: 24px;
+  grid-template-rows: max-content max-content;
+  justify-content: start;
+  justify-items: start;
+  gap: 12px;
   align-content: center;
   height: 0;
   min-height: 0;
@@ -591,6 +698,21 @@ body:has(#empty:not([hidden])) .status {
 
 .now[data-dual="true"] #chord-keys-former {
   grid-row: 2;
+}
+
+/* Guitar diagrams have empty margins around VexChords' fixed canvas, so dual view draws them
+   toward the shared centre. The piano keeps its own spacing; --guitar-overlap is the amount each
+   picture moves, so the visual overlap between the two is twice that. */
+.now[data-dual="true"] .chord-keys-stack {
+  --guitar-overlap: 20px;
+}
+
+.now[data-dual="true"] #chord-keys[data-instrument="guitar"] svg {
+  transform: translateY(var(--guitar-overlap));
+}
+
+.now[data-dual="true"] #chord-keys-former[data-instrument="guitar"] svg {
+  transform: translateY(calc(-1 * var(--guitar-overlap)));
 }
 
 .key {
@@ -659,6 +781,16 @@ body:has(#empty:not([hidden])) .status {
   border-radius: 3px;
   padding: 5px 8px;
   cursor: pointer;
+}
+
+.pick select option,
+.key-select option {
+  color: var(--ink);
+  background-color: var(--sheet);
+}
+
+.key-select option[data-separator] {
+  color: var(--rule);
 }
 
 .pick select:hover,
@@ -996,7 +1128,7 @@ body:has(#empty:not([hidden])) .status {
 }
 
 /* Without a recording there is no Mute for the divider to set the chord group apart from. */
-#mute-recording[hidden] + .listen-chords {
+#mute-recording[hidden]+.listen-chords {
   padding-left: 0;
   border-left: 0;
 }
@@ -1154,10 +1286,6 @@ body:has(#empty:not([hidden])) .status {
   }
 
   /* GitHub and Open files share the wordmark's row, opposite it. */
-  .repo {
-    margin-left: auto;
-  }
-
   .files {
     order: 2;
     flex-basis: 100%;

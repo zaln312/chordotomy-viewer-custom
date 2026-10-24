@@ -65,6 +65,7 @@
     sus2: "sus 2",
     "7sus4": "seven sus 4",
   };
+  const THEME_STATES = ["auto", "light", "dark"];
 
   const $ = (id) => document.getElementById(id);
   const audio = $("audio");
@@ -84,9 +85,12 @@
   // song, drawn in a strip of its own (renderLab). Never edited, saved or played.
   let lab = null;
   let labName = null;
-  // Dual view shows ChordFormer's keys under chordotomy's while the two current chords differ.
-  // `formerSignature` keeps that picture from being rebuilt on every playback frame.
+  // Dual view shows ChordFormer's keys under chordotomy's. Deduplication hides that picture when
+  // the two readings are on the same notes. `formerSignature` keeps the picture from being rebuilt
+  // on every playback frame.
   let dualView = false;
+  let dualDeduplicate = false;
+  let guitarView = false;
   let formerSignature = null;
   // null is auto, following the OS; "light" and "dark" are the button's own choices, for this page
   // view only.
@@ -106,6 +110,7 @@
   let looping = false;
   let turnTarget = 0;
   let turnUntil = 0;
+  let popoverTimer = null;
   let chordStrikes = [];
   let chordVoicings = [];
   let playChords = false;
@@ -538,6 +543,28 @@
     $("key-name").textContent = key ? Core.keyName(key.label) : "None";
     const select = $("key-select");
     setEstimate(candidates.length ? candidates[0] : null);
+    const ranked = new Set(candidates);
+    const options = new Map(
+      [...select.options]
+        .slice(1)
+        .filter((option) => !option.dataset.separator)
+        .map((option) => [option.value, option]),
+    );
+    const rankedOptions = (given ? candidates : candidates.slice(1)).map(
+      (label) => options.get(label),
+    );
+    const otherOptions = Harmony.KEYS
+      .filter((label) => !ranked.has(label))
+      .map((label) => options.get(label));
+    const orderedOptions = [...rankedOptions];
+    if (candidates.length && otherOptions.length) {
+      const separator = new Option("────────────", "__separator__");
+      separator.disabled = true;
+      separator.dataset.separator = "";
+      orderedOptions.push(separator);
+    }
+    orderedOptions.push(...otherOptions);
+    select.replaceChildren(select.options[0], ...orderedOptions);
     select.value = given ? key.label : "";
     // Given, the candidates' heading says so; the line above them is for the other cases.
     $("key-source").hidden = given && candidates.length > 0;
@@ -853,6 +880,8 @@
     button.replaceChildren();
     button.hidden = segment.chord === "N";
     if (button.hidden) return;
+    if (guitarView && window.GuitarChords?.render(button, segment, highlight, action)) return;
+    button.dataset.instrument = "piano";
     const notes = theoryKeys(segment);
     const names = notes.map(keyNoteName);
     const [lowest, highest] = keyRange(notes);
@@ -865,7 +894,7 @@
     for (const name of names) keyboard.fillKey(name);
     const label = `${action} ${names.join(" ")}`;
     button.setAttribute("aria-label", label);
-    button.title = label;
+    button.title = "Play this chord";
   }
 
   // The index of the lab segment sounding at `t`, or -1 before the first one. Lab segments are
@@ -894,21 +923,31 @@
   }
 
   // ChordFormer's keys, under chordotomy's, whenever dual view is on and the lab has a chord under
-  // the playhead, whether or not it matches the timeline's. The signature changes when the lab
-  // moves to another chord, so playback doesn't rebuild the SVG on every frame.
+  // the playhead. Deduplication hides them when the two readings are on the same notes. The
+  // signature includes both readings' agreement, so playback doesn't rebuild the SVG on every
+  // frame and still notices when the timeline's chord catches up with the lab's.
   function renderFormerKeys() {
     let reading = null;
     let signature = "";
+    let duplicate = false;
     if (dualView && timeline && lab?.length) {
       reading = labReadingAt(now());
       if (reading?.read.chord && reading.read.chord !== "N") {
-        signature = `${reading.index}:${reading.read.chord}:${reading.read.bass ?? ""}`;
+        const segment = timeline.segments[currentIndex()];
+        const same = segment?.chord && Core.sameNotes(reading.read.chord, segment.chord);
+        duplicate = Boolean(dualDeduplicate && same);
+        signature = [
+          reading.index,
+          reading.read.chord,
+          reading.read.bass ?? "",
+          duplicate ? "hidden" : dualDeduplicate ? "different" : "all",
+        ].join(":");
       }
     }
     if (signature === formerSignature) return;
     formerSignature = signature;
     const button = $("chord-keys-former");
-    if (!signature) {
+    if (!signature || duplicate) {
       button.hidden = true;
       button.replaceChildren();
       return;
@@ -1298,10 +1337,61 @@
 
   function setDualView(on) {
     dualView = on;
+    // if (on) setDualDeduplicate(true);
+    $("view-switch").dataset.dual = String(on);
     $("dual-view").setAttribute("aria-pressed", String(on));
+    $("dual-view-label").textContent = on ? "Dual view" : "Single view";
     document.querySelector(".now").dataset.dual = String(on);
     formerSignature = null;
     renderFormerKeys();
+  }
+
+  function closePopoverSoon() {
+    clearTimeout(popoverTimer);
+    popoverTimer = setTimeout(() => {
+      popoverTimer = null;
+      $("view-switch").classList.remove("popover-open");
+    }, 500);
+  }
+
+  function openPopover() {
+    clearTimeout(popoverTimer);
+    popoverTimer = null;
+    $("view-switch").classList.add("popover-open");
+  }
+
+  function setDualDeduplicate(on) {
+    dualDeduplicate = on;
+    for (const button of document.querySelectorAll(".view-switch-popover .button")) {
+      button.setAttribute("aria-pressed", String(button.dataset.deduplicate === String(on)));
+    }
+    formerSignature = null;
+    renderFormerKeys();
+  }
+
+  function redrawInstrument() {
+    if (current === null || !timeline) return;
+    formerSignature = null;
+    show(current);
+  }
+
+  function setGuitarView(on) {
+    guitarView = on;
+    $("guitar-view").setAttribute("aria-pressed", String(on));
+    renderInstrumentButton();
+    redrawInstrument();
+  }
+
+  function renderInstrumentButton() {
+    const button = $("guitar-view");
+    const choice = guitarView ? "guitar" : "piano";
+    button.dataset.choice = choice;
+    button.setAttribute(
+      "aria-label",
+      `Instrument: ${choice[0].toUpperCase() + choice.slice(1)}. Switch to ${
+        guitarView ? "Piano" : "Guitar"
+      }`,
+    );
   }
 
   // The theme starts on auto and follows the OS. A click sets the opposite of what is showing, and
@@ -1312,32 +1402,50 @@
 
   function renderThemeButton() {
     const button = $("theme-toggle");
-    const theme = currentTheme();
-    const next = theme === "dark" ? "light" : "dark";
-    button.textContent = themeChoice ? `Theme: ${theme === "dark" ? "Dark" : "Light"}` : "Theme: Auto";
-    button.title = `Theme: ${themeChoice ? theme : `auto (${theme})`}. Switch to ${next}`;
-    button.setAttribute("aria-label", button.title);
+    const choice = themeChoice ?? "auto";
+    const next = THEME_STATES[(THEME_STATES.indexOf(choice) + 1) % THEME_STATES.length];
+    const label = (state) => state[0].toUpperCase() + state.slice(1);
+    button.dataset.choice = choice;
+    button.setAttribute("aria-label", `Theme: ${label(choice)}. Switch to ${label(next)}`);
   }
 
   function applyTheme() {
     if (themeChoice) document.documentElement.dataset.theme = themeChoice;
     else delete document.documentElement.dataset.theme;
     renderThemeButton();
+    if (guitarView) redrawInstrument();
   }
 
   $("dual-view").addEventListener("click", (event) => {
     releaseFocus(event);
     setDualView(!dualView);
   });
+  $("view-switch").addEventListener("pointerenter", openPopover);
+  $("view-switch").addEventListener("pointerleave", closePopoverSoon);
+  for (const button of document.querySelectorAll(".view-switch-popover .button")) {
+    button.addEventListener("click", (event) => {
+      releaseFocus(event);
+      setDualDeduplicate(button.dataset.deduplicate === "true");
+    });
+  }
+  $("guitar-view").addEventListener("click", (event) => {
+    releaseFocus(event);
+    setGuitarView(!guitarView);
+  });
   $("theme-toggle").addEventListener("click", (event) => {
     releaseFocus(event);
-    themeChoice = currentTheme() === "dark" ? "light" : "dark";
+    const current = themeChoice ?? "auto";
+    themeChoice = current === "dark" ? null : THEME_STATES[THEME_STATES.indexOf(current) + 1];
     applyTheme();
   });
   darkTheme.addEventListener("change", () => {
-    if (!themeChoice) renderThemeButton();
+    if (!themeChoice) {
+      renderThemeButton();
+      if (guitarView) redrawInstrument();
+    }
   });
   applyTheme();
+  renderInstrumentButton();
 
   for (const button of document.querySelectorAll(".open-files")) {
     button.addEventListener("click", (event) => {
@@ -1420,8 +1528,9 @@
     });
   }
 
-  // The key select lists the 24 keys after Estimated, in the analyzer's order, named as the page
-  // names keys. It lets go of focus after a mouse pick as the picker's selects do.
+  // The key select lists the 24 keys after Estimated, ranked candidates first and then the
+  // remaining keys in analyzer order. It lets go of focus after a mouse pick as the picker's
+  // selects do.
   const keySelect = $("key-select");
   keySelect.append(...Harmony.KEYS.map((label) => new Option(Core.keyName(label), label)));
   keySelect.addEventListener("pointerdown", () => (pointerPick = true));
